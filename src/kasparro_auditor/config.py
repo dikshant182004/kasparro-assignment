@@ -66,8 +66,8 @@ class Settings(BaseSettings):
     # primary (production GA, $0.15/M in, $0.60/M out) with openai/gpt-oss-20b
     # as fallback. Free-tier rate limit: 30 RPM / 1,000 RPD / 8K TPM.
     groq_api_key: str = ""
-    groq_model: str = "openai/gpt-oss-120b"
-    groq_fallback_model: str = "openai/gpt-oss-20b"
+    groq_model: str = "openai/gpt-oss-20b"
+    groq_fallback_model: str = "openai/gpt-oss-120b"
     groq_timeout_seconds: float = 30.0
     groq_max_retries: int = 2
     groq_max_output_tokens: int = 1024
@@ -89,7 +89,7 @@ class Settings(BaseSettings):
 
     # ---- Pipeline guards ---------------------------------------------------
     # Free-tier Groq limit is 30 RPM. Use concurrency=2 to leave margin.
-    max_concurrent_llm_calls: int = 2
+    max_concurrent_llm_calls: int = 1
     analysis_timeout_seconds: int = 900
     # Hard cap on total LLM calls per run (prevents runaway cost).
     max_llm_calls_per_run: int = 200

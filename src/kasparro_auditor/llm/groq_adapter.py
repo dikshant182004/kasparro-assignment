@@ -1,17 +1,16 @@
-"""Groq live adapter using Instructor + structured outputs.
+"""Groq live adapter using Instructor + JSON mode.
 
-IMPORTANT (Oct 2026): Groq retired llama-3.3-70b-versatile and
-llama-3.1-8b-instant on 16 August 2026 (free + developer tiers).
-Default primary is now `openai/gpt-oss-120b` (production GA, $0.15/M
-input, $0.60/M output). Fallback is `openai/gpt-oss-20b`.
+IMPORTANT: Groq's openai/gpt-oss models have a known bug with tool calling
+(function calling). They produce the correct JSON but wrap it in a tool call
+to a non-existent function named 'json', causing 400 errors.
 
-Free-tier rate limit: 30 RPM / 1,000 RPD / 8K TPM. With concurrency=2
-and 150 calls, the run takes ~5 minutes minimum — right at the limit.
-Add 429 retry with exponential backoff.
+Fix: use instructor.Mode.JSON instead of the default Mode.TOOLS. JSON mode
+tells the model to return a raw JSON object (via response_format) instead of
+using function calling. Instructor then validates the JSON against the
+Pydantic schema.
 
-Per-call model name tracking: the returned Judgment carries the model
-name actually used (not the adapter's default), so concurrent calls
-that fall back don't get mislabelled.
+Default primary: openai/gpt-oss-20b (smaller, faster, 1000 TPM free tier).
+Fallback: openai/gpt-oss-120b (larger, 500 TPM free tier).
 """
 from __future__ import annotations
 
@@ -25,7 +24,7 @@ from groq import AsyncGroq
 
 try:
     from instructor.core import InstructorRetryException
-except ImportError:  # backwards-compat for older instructor versions
+except ImportError:
     from instructor.exceptions import InstructorRetryException
 
 from kasparro_auditor.config import Settings, get_settings
@@ -40,7 +39,6 @@ from kasparro_auditor.llm.adapter import (
     prompt_hash,
     verify_evidence,
 )
-from kasparro_auditor.schemas.results import Judgment  # noqa: F401 — re-export
 
 
 # Cache file path keyed by (response_id, prompt_hash, model_name) so stale
@@ -51,32 +49,40 @@ def _cache_path(cache_dir: Path, response_id: str, p_hash: str, model: str) -> P
 
 
 class GroqAdapter:
-    """Live Groq adapter. Caches each successful response for replay."""
+    """Live Groq adapter using JSON mode (avoids tool-calling bugs).
+
+    Uses instructor.Mode.JSON which:
+      1. Sets response_format={"type": "json_object"}
+      2. Injects the Pydantic schema into the system prompt
+      3. Parses the raw JSON response and validates against the schema
+
+    This avoids Groq's function-calling bug where openai/gpt-oss models
+    try to call a non-existent tool named 'json'.
+    """
 
     mode = "live"
 
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
         if not self.settings.groq_api_key:
-            # Missing API key is a provider/config error, NOT a timeout.
             raise LLMProviderError(
                 "GROQ_API_KEY not set. Use EXECUTION_MODE=replay or stub for offline runs, "
                 "or EXECUTION_MODE=local for an Ollama adapter.",
                 error_code=ErrorCode.PROVIDER_ERROR,
             )
+        # Use JSON mode instead of the default TOOLS mode.
+        # Groq's openai/gpt-oss models have a bug with tool calling.
         self.client = instructor.from_groq(
             AsyncGroq(api_key=self.settings.groq_api_key),
+            mode=instructor.Mode.JSON,
+            max_retries=self.settings.groq_max_retries,
         )
-        self.model_name = self.settings.groq_model  # default; per-call returns override
+        self.model_name = self.settings.groq_model
         self._cache_dir = self.settings.replay_cache_dir
         self._cache_dir.mkdir(parents=True, exist_ok=True)
 
     async def classify(self, ctx: LLMContext):
-        """Call Groq with structured outputs; cache the result on success.
-
-        Returns the Judgment object. The caller is responsible for
-        combining it with Facts to produce a ResponseResult row.
-        """
+        """Call Groq with JSON mode; cache the result on success."""
         from kasparro_auditor.llm.adapter import Judgment as _J
 
         user_prompt = build_user_prompt(ctx)
@@ -119,10 +125,8 @@ class GroqAdapter:
                         f"{self.settings.groq_timeout_seconds}s",
                         response_id=ctx.response_id,
                     )
-                    # Exponential backoff before next attempt
                     await asyncio.sleep(min(2 ** attempt, 8))
                 except InstructorRetryException as err:
-                    # Instructor already retried internally; surface as malformed.
                     last_error = MalformedLLMOutput(
                         f"Groq {model_name} returned non-conforming output: {err}",
                         response_id=ctx.response_id,
@@ -134,9 +138,12 @@ class GroqAdapter:
                         f"Groq {model_name} attempt {attempt} failed: {err}",
                         response_id=ctx.response_id,
                     )
-                    await asyncio.sleep(min(2 ** attempt, 8))
+                    # If it's a 429 rate limit, wait longer
+                    if "429" in str(err) or "rate_limit" in str(err).lower():
+                        await asyncio.sleep(min(2 ** attempt, 16))
+                    else:
+                        await asyncio.sleep(min(2 ** attempt, 8))
 
-        # All attempts across both models failed
         if isinstance(last_error, (LLMTimeout, LLMProviderError, MalformedLLMOutput)):
             raise last_error
         raise LLMProviderError(
