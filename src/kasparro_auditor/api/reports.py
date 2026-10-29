@@ -137,7 +137,13 @@ async def create_report_draft(
     if run is None:
         raise NotFoundError(f"AnalysisRun {analysis_id} not found.")
 
-    diagnostics, remedies, score, diag_source = await build_diagnostics_and_remedies(session, run.id)
+    # Only attempt LLM diagnostics synthesis in live mode. Stub/replay
+    # modes have no LLM client, so they'd fail and fall back to rule-based
+    # with a misleading 'rule_llm_failed' flag.
+    use_llm = run.execution_mode.value == "live"
+    diagnostics, remedies, score, diag_source = await build_diagnostics_and_remedies(
+        session, run.id, use_llm=use_llm
+    )
     scores_dict = score.model_dump()
     engine_summary = await _group_by_engine_summary(session, run.id)
     # Convert per_category CategorySlice objects to plain dicts (JSON-serializable)
