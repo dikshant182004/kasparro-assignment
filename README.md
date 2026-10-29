@@ -7,62 +7,290 @@ Backend service that turns 50 prompts × 3 AI engines (150 archived answers + 2,
 
 ---
 
-## Stack
+## 📐 Architecture Diagram
 
-| Layer | Choice | Why |
-|---|---|---|
-| Language | Python 3.11+ | Brief preference; pydantic-settings requires it |
-| Web framework | FastAPI 0.120+ | Auto OpenAPI docs, Pydantic-native validation, async |
-| ORM/DB | SQLAlchemy 2.0 (async) + SQLite | Sufficient per brief; SQLAlchemy 2.0 gives typed models |
-| Validation | Pydantic v2 | Same models at API boundary + LLM structured output |
-| Settings | pydantic-settings 2.x | Required `.env.example` comes for free |
-| LLM provider | **Groq** | Production GA, $0.24 cost for the full 150-call run |
-| Primary model | `llama-3.3-70b-versatile` | Best reasoning among Groq production models |
-| Fallback model | `llama-3.1-8b-instant` | Cheaper/faster; used if primary fails |
-| Structured outputs | Instructor 1.x | Pydantic-validated responses with auto-retry |
-| Tests | pytest + httpx AsyncClient | FastAPI-native async testing |
-| Lint | ruff + mypy | Modern, fast |
-
----
-
-## Quick start (≤ 10 minutes after prerequisites)
-
-```bash
-# 1. Clone / extract the project
-cd kasparro-auditor
-
-# 2. Create venv + install deps (Python 3.11+ required)
-make setup
-source .venv/bin/activate
-
-# 3. Copy env template (no edits needed for stub/replay mode)
-cp .env.example .env
-
-# 4. Run the offline input pack checker (verifies data integrity)
-python3 data_pack/tools/check_pack.py    # if data_pack is the assignment dir
-
-# 5. Initialize the SQLite database
-make init
-
-# 6. Run the full pipeline in replay mode (no API key needed)
-make replay
-#   → writes outputs/analysis_output.json
-
-# 7. (Optional) Run the API server
-make run
-#   → http://127.0.0.1:8000/docs
-
-# 8. Run the test suite
-make test
-
-# 9. Run the evaluation harness
-make eval
-#   → writes eval/results/comparison_report.md
+```
+                ┌─────────────────────────────────────────────────────────────┐
+                │                  DATA PACK (gitignored)                     │
+                │  prompts.jsonl (50)  responses.jsonl (150)  citations (2439)│
+                └────────────────────────┬────────────────────────────────────┘
+                                         │
+                                         ▼
+   ┌─────────────────────────────────────────────────────────────────────────┐
+   │  1. INGESTION  (src/kasparro_auditor/ingest/)                           │
+   │  JSONL → Pydantic validation → SQLite (idempotent upsert)                │
+   │  - Per-line JSON parsing (one bad row never kills the batch)             │
+   │  - Content hashing for reuse-vs-conflict detection                      │
+   │  - URL normalization + referential integrity checks                     │
+   │  - raw_json column preserves original inputs                             │
+   └────────────────────────┬────────────────────────────────────────────────┘
+                            │
+                            ▼
+   ┌─────────────────────────────────────────────────────────────────────────┐
+   │  2. CLASSIFICATION  (src/kasparro_auditor/scoring/classify.py)          │
+   │  - Facts (deterministic): mention regex, competitors, citation counts   │
+   │  - Judgment (LLM): recommendation, negative, position, evidence          │
+   │  - Skip-LLM-when-absent optimization (78/150 calls saved)                │
+   │  - Per-record catch-all isolation (one bad row never aborts run)         │
+   │  - ErrorCode enum (timeout/malformed/evidence_unsupported/...)           │
+   │  - Adapters: Groq (live) | Ollama (local) | Replay (cached) | Stub     │
+   └────────────────────────┬────────────────────────────────────────────────┘
+                            │
+                            ▼
+   ┌─────────────────────────────────────────────────────────────────────────┐
+   │  3. SCORING  (src/kasparro_auditor/scoring/score.py)                    │
+   │  - v2 formula: multiplier-based negative (no free points for absent)    │
+   │  - Position renormalises when unobservable                               │
+   │  - Headline = mean of per-row scores (always consistent with parts)     │
+   │  - All-failed runs return None + insufficient_data=True                  │
+   │  - Cluster bootstrap over prompts (not responses)                        │
+   │  - Per-engine + per-category slices with denominators                   │
+   │  - Weight sensitivity table (3 alternative weight sets)                 │
+   └────────────────────────┬────────────────────────────────────────────────┘
+                            │
+                            ▼
+   ┌─────────────────────────────────────────────────────────────────────────┐
+   │  4. REPORTS  (src/kasparro_auditor/reports/)                            │
+   │  - State machine: draft → submitted → approved | rejected               │
+   │  - Optimistic locking (lock_version) for concurrent decisions            │
+   │  - content_hash at submit, verified at export (tamper detection)        │
+   │  - Submit gate: 3 diagnostics + 3 remedies + evidence verification      │
+   │  - Fork only from non-draft (prevents parallel drafts)                   │
+   └────────────────────────┬────────────────────────────────────────────────┘
+                            │
+                            ▼
+   ┌─────────────────────────────────────────────────────────────────────────┐
+   │  5. API  (src/kasparro_auditor/api/)                                    │
+   │  - FastAPI + typed exception hierarchy (no string matching)              │
+   │  - Two-token auth (analyst + reviewer) with hmac.compare_digest         │
+   │  - Default tokens refused at startup                                     │
+   │  - Endpoints: /datasets, /analyses, /reports, /health, /docs             │
+   │  - New: /analyses/{id}/results (paged), /analyses/{id}/score            │
+   │  - Export includes: analysis_id, execution_mode, model_name,             │
+   │    scoring_version, model_quality_verified, content_hash, is_latest     │
+   └─────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Project layout
+## 🚀 Quick Start (≤ 10 minutes after prerequisites)
+
+### Prerequisites
+
+- **Python 3.11+** (3.12 or 3.13 recommended)
+- **Git** (to clone the repo)
+- **The assignment data pack** (place it locally — it's gitignored)
+
+### Step 1: Clone the repository
+
+```powershell
+git clone https://github.com/dikshant182004/kasparro-assignment.git
+cd kasparro-assignment
+git checkout master
+```
+
+### Step 2: Create + activate a virtual environment
+
+**PowerShell (Windows):**
+```powershell
+python -m venv .venv
+.\.venv\Scripts\activate
+```
+
+**macOS/Linux:**
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+### Step 3: Install dependencies
+
+```powershell
+pip install -e ".[dev]"
+```
+
+This installs FastAPI, SQLAlchemy 2.0, Pydantic v2, Groq SDK, Instructor, pytest, and all other dependencies defined in `pyproject.toml`.
+
+### Step 4: Place the assignment data
+
+The supplied data pack is **gitignored** (per the brief: *"Keep supplied data and private outputs out of public Git history."*). You need to place it locally:
+
+```powershell
+# Create the data_pack directory
+mkdir data_pack
+
+# Copy the assignment's data/ folder into data_pack/
+# (Replace with the actual path to your extracted assignment)
+Copy-Item -Recurse C:\path\to\extracted\assignment\data data_pack\
+
+# Verify the structure
+ls data_pack\data\
+# Expected: prompts.jsonl  responses.jsonl  citations.jsonl  run.json  READ_ME.txt
+```
+
+**Linux/macOS:**
+```bash
+mkdir -p data_pack
+cp -r /path/to/extracted/assignment/data data_pack/
+ls data_pack/data/
+# Expected: prompts.jsonl  responses.jsonl  citations.jsonl  run.json  READ_ME.txt
+```
+
+### Step 5: Configure environment variables
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Edit `.env` and change these values:
+
+```env
+# Use stub mode for offline runs (no API key needed)
+EXECUTION_MODE=stub
+
+# Change these from the defaults (the app refuses to start with defaults)
+ANALYST_TOKEN=real-analyst-token-change-this
+REVIEWER_TOKEN=real-reviewer-token-change-this
+
+# Database (SQLite file)
+DATABASE_URL=sqlite+aiosqlite:///./kasparro.db
+
+# Data pack location
+DATA_PACK_DIR=./data_pack
+```
+
+### Step 6: Initialize the database
+
+> **⚠️ IMPORTANT: You must re-initialize the database for every fresh pipeline run.**
+> If you run the pipeline script and then start the API server (or vice versa) on the same DB, you'll get stale data. Delete `kasparro.db` and re-init before each service run.
+
+```powershell
+python -m scripts.init_db
+```
+
+**Expected**: `Database initialised at: sqlite+aiosqlite:///./kasparro.db`
+
+### Step 7: Run the pipeline
+
+```powershell
+python -m scripts.run_analysis --out outputs/analysis_output.json
+```
+
+**Expected output**:
+```
+=== Analysis summary ===
+Mode:           stub
+Model:          stub-v1
+Counts:         prompts=50 responses(new=150, reused=0) citations=2439 rejected=0
+Results:        successful=150 failed=0 skipped=0
+Score:          composite=17.69/100 (95% CI: 12.24-23.29)
+
+Diagnostics (3):
+  - [lead_branded_vs_generic] Branded prompts score 35.4 vs generic 0.0 (gap +35.4)
+  - [loss_gemini_mention_rate] Kasparro is rarely named in GEMINI answers
+  - [risk_negative_characterisation] 11 responses characterise Kasparro negatively
+
+Full output written to: outputs/analysis_output.json
+```
+
+### Step 8: Start the API server
+
+```powershell
+python -m uvicorn kasparro_auditor.main:app --reload --port 8000
+```
+
+Open http://127.0.0.1:8000/docs in your browser for the auto-generated OpenAPI docs.
+
+---
+
+## 🛠️ Running with Make (if installed)
+
+If you have `make` installed (via Chocolatey on Windows, or natively on macOS/Linux):
+
+```bash
+make setup    # Create venv + install deps
+make init     # Initialize the database
+make replay   # Run the pipeline in stub mode
+make test     # Run all 116 tests
+make eval     # Run the evaluation harness
+make run      # Start the API server
+```
+
+> **Note**: On Windows, `make` is not installed by default. Use the PowerShell commands above, or install make via `scoop install make` or `choco install make`.
+
+---
+
+## 📊 Execution Modes
+
+The pipeline supports four execution modes, controlled by the `EXECUTION_MODE` env var:
+
+| Mode | Description | API Key Needed | Use Case |
+|------|-------------|----------------|----------|
+| `stub` | Deterministic regex-based classifier | No | Tests, offline runs, default for submission |
+| `replay` | Returns cached LLM outputs from `data_pack/replay/` | No | Reviewers re-running with cached live outputs |
+| `live` | Real Groq API calls | Yes (`GROQ_API_KEY`) | Final live-model run |
+| `local` | Ollama (local LLM, OpenAI-compatible) | No | Approved local-model access per brief |
+
+### Switching to live mode (Groq)
+
+1. Get a Groq API key from https://console.groq.com/keys
+2. Edit `.env`:
+   ```env
+   EXECUTION_MODE=live
+   GROQ_API_KEY=gsk_your_real_key_here
+   GROQ_MODEL=openai/gpt-oss-20b
+   ```
+3. Re-initialize the DB and run:
+   ```powershell
+   Remove-Item kasparro.db -Force -ErrorAction SilentlyContinue
+   python -m scripts.init_db
+   python -m scripts.run_analysis --mode live --out outputs/analysis_output_live.json
+   ```
+
+### Switching to local mode (Ollama)
+
+1. Install Ollama: https://ollama.com/download
+2. Pull a model:
+   ```powershell
+   ollama pull llama3.1:8b
+   ```
+3. Edit `.env`:
+   ```env
+   EXECUTION_MODE=local
+   OLLAMA_MODEL=llama3.1:8b
+   ```
+4. Re-initialize the DB and run:
+   ```powershell
+   Remove-Item kasparro.db -Force -ErrorAction SilentlyContinue
+   python -m scripts.init_db
+   python -m scripts.run_analysis --mode local --out outputs/analysis_output_local.json
+   ```
+
+---
+
+## 🧪 Running Tests
+
+### Full test suite (116 tests)
+
+```powershell
+$env:DATABASE_URL="sqlite+aiosqlite:///:memory:"; $env:EXECUTION_MODE="stub"; python -m pytest tests/ -v
+```
+
+**Expected**: `116 passed, 1 skipped`
+
+### Evaluation harness
+
+```powershell
+$env:DATABASE_URL="sqlite+aiosqlite:///:memory:"; $env:EXECUTION_MODE="stub"; python -m eval.run_eval --out eval/results/comparison_report.md
+```
+
+**Expected**: 17 cases loaded, citation metrics, diagnostics checker passes.
+
+See [docs/TESTING.md](docs/TESTING.md) for the full testing guide.
+
+---
+
+## 📁 Project Layout
 
 ```
 kasparro-auditor/
@@ -73,234 +301,65 @@ kasparro-auditor/
 │   ├── db/                    # SQLAlchemy 2.0 entities
 │   ├── schemas/               # Pydantic: inputs, results, API
 │   ├── ingest/                # JSONL → SQLite + URL normalization
-│   ├── llm/                   # Groq + Replay + Stub adapters (one Protocol)
-│   ├── scoring/               # classify, counts, score, competitors
+│   ├── llm/                   # Groq + Ollama + Replay + Stub adapters
+│   ├── scoring/               # classify, counts, score, competitors, facts
 │   ├── reports/               # state machine + diagnostics/remedies
 │   └── api/                   # FastAPI routers + auth deps + errors
-├── tests/                     # pytest; failure_scenarios.json mapped 1:1
+├── tests/                     # pytest; 116 tests
 ├── eval/                      # cases.jsonl + grader + baseline + run_eval
 ├── scripts/                   # init_db, run_analysis, replay_capture
-├── data_pack/                 # supplied assignment data (not committed)
-├── fixtures/                  # failure_scenarios.json
-├── DECISION_NOTE.md           # ~1-page decision note (required)
-├── TIMELOG.md                 # active-time log (required)
+├── docs/                      # Architecture, Testing, Observations docs
+├── data_pack/                 # supplied assignment data (gitignored)
+├── DECISION_NOTE.md           # ~1-page decision note
+├── TIMELOG.md                 # active-time log
+├── outputs/                   # analysis output JSON (gitignored)
 └── Makefile
 ```
 
 ---
 
-## API endpoints (exact contract from the brief)
+## 🔑 Key Design Decisions
 
-| Method | Path | Role | Description |
-|---|---|---|---|
-| GET | `/health` | either | Liveness probe |
-| POST | `/datasets` | analyst | Import JSONL pack (idempotent on `response_id`) |
-| GET | `/datasets/{id}` | either | Inspect imported dataset |
-| POST | `/analyses` | analyst | Run classification on a dataset |
-| GET | `/analyses/{id}` | either | Inspect run status + counts |
-| POST | `/analyses/{id}/reports` | analyst | Create draft from completed run |
-| PATCH | `/reports/{id}` | analyst | Edit a **draft** (non-draft → 409) |
-| POST | `/reports/{id}/submit` | analyst | Freeze version → submitted |
-| POST | `/reports/{id}/decision` | reviewer | Approve or reject + comment |
-| POST | `/reports/{id}/fork` | analyst | New draft from a submitted/approved version |
-| GET | `/reports/{id}` | either | Inspect any version |
-| GET | `/reports/{id}/export` | either | Export approved-only (others → 409) |
-| GET | `/docs` | — | Auto-generated OpenAPI |
+1. **Facts vs Judgment split**: mention, competitors, and citation counts are computed deterministically in code. The LLM only returns recommendation, negative, position, and evidence.
+2. **Skip-LLM-when-absent**: 78 of 150 responses don't mention Kasparro → LLM is never called for them → saves cost + removes fake "evidence of absence".
+3. **v2 scoring formula**: multiplier-based negative (no free 15 points for absent responses). Headline = mean of per-row scores (always consistent with parts).
+4. **Optimistic locking**: `lock_version` on `ReportVersion` catches concurrent reviewer decisions.
+5. **content_hash**: computed at submit, verified at export (tamper detection).
+6. **Typed exceptions**: no string matching for error codes — `NotFoundError` → 404, `WrongRoleError` → 403, etc.
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full architecture walkthrough.
 
 ---
 
-## Auth model
+## 📝 Notes
 
-- Two static tokens in `.env`: `ANALYST_TOKEN`, `REVIEWER_TOKEN`.
-- Identity is derived **only** from the bearer token. A caller-supplied role or actor name is **never** authorisation.
-- `/submit` and `/patch` require the analyst role.
-- `/decision` requires the reviewer role.
-- `/export` accepts either role but only on an approved version.
-
----
-
-## LLM usage
-
-| Step | When | Cost |
-|---|---|---|
-| Classification (150 calls) | Per response, via `classify_response` | ~$0.24 total |
-| Diagnostic synthesis (1 call) | After analysis completes | ~$0.01 |
-| Remedy drafting (1 call) | After diagnostics | ~$0.01 |
-
-**Three execution modes:**
-- `live` — real Groq calls with `GROQ_API_KEY`
-- `replay` — returns cached JSON for known `response_id`; falls back to stub
-- `stub` — deterministic regex-based; for tests and offline eval
-
-Every output row is labelled with its `execution_mode` and `model_name`.
-
----
-
-## Citation dedup rule (disclosed)
-
-- **Raw storage:** every citation occurrence is stored verbatim (preserves order, type, position, url).
-- **Per-response uniqueness:** `DISTINCT (response_id, normalized_url)` where `normalized_url` strips the URL fragment + tracking params (`utm_*`, `gclid`, `fbclid`, `mc_cid`, `mc_eid`, `ref`, `source`, etc.) and sorts remaining query params.
-- **Cross-response recurrence:** same `normalized_url` appearing in >1 response is counted as a recurrence; raw occurrences preserved.
-- URL fragments and tracking parameters are preserved in the raw `url` column.
-
-See `src/kasparro_auditor/ingest/normalize.py` for the canonical implementation.
-
----
-
-## Visibility score formula
-
-```
-composite = 100 * (
-    0.30 * mention_rate
-  + 0.25 * recommendation_rate
-  + 0.15 * (1 - negative_rate)
-  + 0.15 * citation_rate
-  + 0.15 * position_score
-)
-```
-
-- Each rate uses `valid_responses` as denominator (excludes failed/skipped).
-- `position_score`: 1.0 for rank #1, decaying by 0.2 per rank down to 0.2 floor.
-- Bootstrap 95% CI over the per-response grid (1000 samples, seed=42).
-- Every component is persisted per `ResponseResult` row for traceability.
-
-A **mention is NOT a recommendation**. A **failed analysis is NOT a successful zero-score observation**.
-
----
-
-## Evaluation harness
-
-```bash
-make eval
-```
-
-Outputs:
-- `eval/results/comparison_report.md` — human-readable
-- `eval/results/comparison_report.json` — machine-readable
-
-Compares:
-1. The candidate classifier (live Groq / replay / stub depending on `EXECUTION_MODE`)
-2. A pure rule-based baseline (`RuleBaseline`)
-
-Per-label precision/recall/F1 on:
-- `mention`
-- `recommendation`
-- `negative_characterisation`
-
-Plus:
-- **Unsupported-claim test:** every classifier output's `evidence_excerpt` is verified to be a verbatim substring of `answer_text`. Failures are listed explicitly.
-- **Deterministic score math:** verified separately in `tests/test_scoring.py` with synthetic data.
-- **Tuning vs final cases:** `is_tuning=true` cases are reported separately; only `is_tuning=false` cases count toward final-check metrics.
-
----
-
-## Test coverage
-
-```bash
-make test
-```
-
-The test suite is mapped 1:1 to `fixtures/failure_scenarios.json`:
-
-| Scenario | Test |
-|---|---|
-| `transient_timeout` | `test_transient_timeout` |
-| `permanent_timeout` | `test_permanent_timeout` |
-| `empty` | `test_empty` |
-| `malformed` | `test_malformed` |
-| `duplicate_request` | `test_duplicate_request` |
-| `wrong_role` | `test_wrong_role` |
-| `rejected_review` | `test_rejected_review` |
-| `review_no_response` | `test_review_no_response` |
-| `change_after_approval` | `test_change_after_approval` |
-
-Plus:
-- `test_scoring.py` — deterministic score math + failed-result exclusion
-- `test_ingest.py` — URL normalization + idempotent import
-- `test_stub_adapter.py` — evidence verification + classification
-
----
-
-## Example end-to-end flow (curl)
-
-```bash
-# 1. Import the pack
-curl -X POST http://127.0.0.1:8000/datasets \
-  -H "Authorization: Bearer $ANALYST_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"source_dir": "./data_pack"}'
-# → {"id": "ds-...", ...}
-
-# 2. Run analysis (stub mode for offline testing)
-curl -X POST http://127.0.0.1:8000/analyses \
-  -H "Authorization: Bearer $ANALYST_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"dataset_id": "ds-...", "execution_mode": "stub"}'
-# → {"id": "run-...", "status": "completed", ...}
-
-# 3. Create a draft report
-curl -X POST http://127.0.0.1:8000/analyses/run-.../reports \
-  -H "Authorization: Bearer $ANALYST_TOKEN"
-# → {"id": "ver-...", "status": "draft", ...}
-
-# 4. Edit the draft
-curl -X PATCH http://127.0.0.1:8000/reports/ver-... \
-  -H "Authorization: Bearer $ANALYST_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"title": "Kasparro AI Visibility Report v1"}'
-
-# 5. Submit for review
-curl -X POST http://127.0.0.1:8000/reports/ver-.../submit \
-  -H "Authorization: Bearer $ANALYST_TOKEN"
-
-# 6. Reviewer approves with a comment
-curl -X POST http://127.0.0.1:8000/reports/ver-.../decision \
-  -H "Authorization: Bearer $REVIEWER_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"decision": "approve", "comment": "Looks good"}'
-
-# 7. Export the approved version
-curl http://127.0.0.1:8000/reports/ver-.../export \
-  -H "Authorization: Bearer $ANALYST_TOKEN"
-```
-
----
-
-## Decision note, time log
-
-- See `DECISION_NOTE.md` for scoring rationale, alternatives, top remedy, failure/fix story, risks, omissions, and AI assistance disclosure.
-- See `TIMELOG.md` for active-time tracking.
-
----
-
-## Reproducibility
-
-```bash
-make setup && make init && make replay && make test && make eval
-```
-
-All outputs are reproducible in `stub` or `replay` mode with no API key. To run with the live model, set `GROQ_API_KEY` and `EXECUTION_MODE=live`.
-
----
-
-## Notes
-
-- A bounded synchronous flow is used for the small assignment dataset (150 responses, bounded concurrency). The brief explicitly allows this.
+- A bounded synchronous flow is used for the small assignment dataset (150 responses). The brief explicitly allows this.
 - All secrets stay in environment variables. The `.env.example` documents every required variable.
-- The supplied pack (`data_pack/`) is NOT committed to git (see `.gitignore`). Reviewers must place it locally.
+- The supplied pack (`data_pack/`) is NOT committed to git. Reviewers must place it locally.
+- **You must re-initialize the database (`python -m scripts.init_db`) for every fresh pipeline run.** If you reuse a stale DB, the pipeline will report `reused=150` and `successful=0`.
 
 ## Concurrency limits and expiry policy (future work)
 
 The brief says *"Describe an expiry policy and concurrency limits as future work; implementing them is optional."*
 
 ### Implemented concurrency limits
-- **Optimistic locking** on `ReportVersion` via the `lock_version` column. Every state transition (PATCH, submit, decide, fork) checks the caller's observed `lock_version` matches the current value, then increments it. Mismatch → 409 `concurrent_modification`. This catches two reviewers deciding at once.
-- **One running analysis per dataset**: `POST /analyses` checks for an existing `status IN ('pending','running')` row on the same dataset and returns 409 `duplicate_request` if found.
-- **Bounded LLM concurrency**: `max_concurrent_llm_calls=2` (default) leaves margin under Groq's 30 RPM free-tier limit.
+- **Optimistic locking** on `ReportVersion` via the `lock_version` column.
+- **One running analysis per dataset**: `POST /analyses` checks for existing running analysis.
+- **Bounded LLM concurrency**: `max_concurrent_llm_calls=1` (default) for Groq free-tier.
 
 ### Future work — expiry policy (described, not implemented)
-- **Approved-version expiry**: An approved report version older than **90 days** should require re-review before export. Rationale: AI engine answers drift over time; an approval based on a 6-month-old capture no longer reflects current visibility. Implementation: add an `expires_at` column to `ReportVersion`, computed at approval time. `assert_exportable()` would refuse export past the expiry with 409 `expired`.
-- **Submitted-but-undecided expiry**: A submitted version that receives no reviewer decision within **7 days** should auto-transition to `expired` (a new state). This prevents submitted versions from sitting in review indefinitely. Implementation: a daily cron job that scans `submitted_at < now() - 7d` and transitions those rows to `expired`.
-- **Draft expiry**: A draft version with no PATCH activity for **30 days** should be auto-archived. Prevents abandoned drafts from cluttering the version history.
-- **Token rotation**: The two local tokens (`ANALYST_TOKEN`, `REVIEWER_TOKEN`) should be rotated every 90 days. The startup check (`validate_startup()`) refuses default tokens; a future enhancement would track `last_rotated_at` and warn after 90 days.
-- **Decision history limit**: A single reviewer making >5 decisions on the same version in 1 hour is suspicious (potential abuse). Rate-limit the `/decision` endpoint per actor.
+- **Approved-version expiry**: 90 days, then re-review required.
+- **Submitted-but-undecided expiry**: 7 days, then auto-transition to `expired`.
+- **Draft expiry**: 30 days of inactivity, then auto-archive.
+- **Token rotation**: 90 days, tracked via `last_rotated_at`.
+- **Decision rate-limiting**: max 5 decisions per actor per version per hour.
+
+---
+
+## 📚 Documentation
+
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — How each piece is made, what was fixed, assignment scope
+- [docs/TESTING.md](docs/TESTING.md) — How to test everything (pipeline, API, live, eval)
+- [docs/OBSERVATIONS.md](docs/OBSERVATIONS.md) — Stub results, live mode observations, replay mode
+- [DECISION_NOTE.md](DECISION_NOTE.md) — ~1-page decision note
+- [TIMELOG.md](TIMELOG.md) — Active-time log
