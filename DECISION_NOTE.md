@@ -69,8 +69,9 @@ This is the highest-priority remedy because: (a) it has low effort, (b) the unce
 - **No Alembic migrations** — `Base.metadata.create_all` on startup is sufficient for the assignment; production would use Alembic.
 - **No OAuth** — the brief says full OAuth is unnecessary; two local tokens suffice.
 - **No multi-agent orchestration** — single bounded synchronous flow per the brief.
-- **Concurrency limits + expiry policy** — described in the README as future work, not implemented.
+- **Concurrency limits + expiry policy** — concurrency limits (optimistic locking, one-running-per-dataset, bounded LLM concurrency) are implemented. Expiry policies (approved-version expiry, submitted-undecided expiry, draft expiry, token rotation, decision rate-limiting) are described in the README as future work, not implemented.
 - **Repeated-model studies** — optional per the brief; the only classifier path exercised in this submission is **stub mode** (deterministic regex). Live-model runs require hiring-team approval per the brief's approved-access rule and were not performed within the time budget. The replay cache is empty; reviewers can populate it via `make capture` after obtaining an approved Groq key, then rerun `make replay` to inspect live-model outputs.
+- **Eval citation cases** — the eval set now includes 3 dedicated citation cases (2 with kasparro.com citations, 1 without). The grader checks `has_kasparro_citation` as a deterministic Fact (precision/recall tracked). Older cases without the `has_kasparro_citation` field are skipped for this metric.
 
 ## Questions before release
 

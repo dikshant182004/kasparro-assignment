@@ -157,6 +157,29 @@ def build_context(case: EvalCase) -> LLMContext:
     )
 
 
+def _compute_has_kasparro_citation(response_id: str) -> bool:
+    """Check the citations.jsonl for any kasparro.com URL on this response_id.
+
+    Loads the citations file directly (not via the DB) so the grader works
+    even before any pipeline run. Returns False if the file is missing.
+    """
+    from kasparro_auditor.config import get_settings
+
+    settings = get_settings()
+    citations_path = settings.data_pack_dir / "data" / "citations.jsonl"
+    if not citations_path.is_file():
+        return False
+    for line in citations_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if row.get("response_id") == response_id:
+            url = row.get("url", "").lower()
+            if "kasparro.com" in url:
+                return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Metrics — None on zero denominator (prints "n/a")
 # ---------------------------------------------------------------------------
@@ -256,6 +279,7 @@ def grade(
     facts_metrics = {
         "mention": LabelMetrics("mention"),
         "prompt_names_brand": LabelMetrics("prompt_names_brand"),
+        "has_kasparro_citation": LabelMetrics("has_kasparro_citation"),
     }
     competitor_metrics = SetMetrics("competitors_known")
     report = GraderReport(classifier_name=classifier_name, mode=mode)
@@ -279,6 +303,19 @@ def grade(
             if mention:
                 facts_metrics["mention"].tp += 1
             # If both are False, it's a true negative — no metric update needed.
+
+        # Verify has_kasparro_citation (only checked when the case explicitly
+        # specifies an expectation — older cases without the field are skipped)
+        if "has_kasparro_citation" in case.expected_facts:
+            # Compute the actual citation flag by checking the DB / citations.jsonl
+            actual_cite = _compute_has_kasparro_citation(case.response_id)
+            expected_cite = case.expected_facts.get("has_kasparro_citation", False)
+            if actual_cite and expected_cite:
+                facts_metrics["has_kasparro_citation"].tp += 1
+            elif actual_cite and not expected_cite:
+                facts_metrics["has_kasparro_citation"].fp += 1
+            elif not actual_cite and expected_cite:
+                facts_metrics["has_kasparro_citation"].fn += 1
 
         # Verify competitors set overlap
         expected_comps = set(case.expected_facts.get("competitors_known", []))
