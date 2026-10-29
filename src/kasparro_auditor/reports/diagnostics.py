@@ -330,7 +330,7 @@ async def _llm_diagnostics_remedies(
                 "recommendation": r.recommendation,
                 "negative": r.negative_characterisation,
                 "position": r.recommendation_position,
-                "competitors": r.competitors_named,
+                "competitors": r.competitors_known,
                 "excerpt": (r.evidence_mention or r.evidence_recommendation or r.evidence_negative)[:300],
             }
             for r in results
