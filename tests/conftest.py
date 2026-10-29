@@ -13,9 +13,14 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 # Set test env BEFORE importing the app.
 os.environ.setdefault("EXECUTION_MODE", "stub")
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
-os.environ.setdefault("ANALYST_TOKEN", "test-analyst-token")
-os.environ.setdefault("REVIEWER_TOKEN", "test-reviewer-token")
+# Use NON-default tokens so Settings.validate_startup() passes.
+# The default tokens are 'analyst-local-token-change-me' / 'reviewer-local-token-change-me'.
+os.environ.setdefault("ANALYST_TOKEN", "real-analyst-token-for-tests")
+os.environ.setdefault("REVIEWER_TOKEN", "real-reviewer-token-for-tests")
 os.environ.setdefault("GROQ_API_KEY", "")
+# Point DATA_PACK_DIR to the project's data_pack/ folder
+_PACK_DIR = Path(__file__).resolve().parent.parent / "data_pack"
+os.environ.setdefault("DATA_PACK_DIR", str(_PACK_DIR))
 
 from kasparro_auditor.config import get_settings  # noqa: E402
 from kasparro_auditor.db import base as db_base  # noqa: E402
@@ -94,12 +99,12 @@ async def client(engine):
 
 @pytest.fixture
 def analyst_headers():
-    return {"Authorization": "Bearer test-analyst-token"}
+    return {"Authorization": "Bearer real-analyst-token-for-tests"}
 
 
 @pytest.fixture
 def reviewer_headers():
-    return {"Authorization": "Bearer test-reviewer-token"}
+    return {"Authorization": "Bearer real-reviewer-token-for-tests"}
 
 
 @pytest.fixture

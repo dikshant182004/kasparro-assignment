@@ -74,7 +74,19 @@ class ExecutionMode(str, enum.Enum):
     LIVE = "live"
     REPLAY = "replay"
     STUB = "stub"
-    LOCAL = "local"  # reserved for a local Ollama-style adapter
+    LOCAL = "local"
+
+
+class ErrorCode(str, enum.Enum):
+    """Per-record failure reason. Stored on ResponseResult.error_code."""
+
+    TIMEOUT = "timeout"
+    PROVIDER_ERROR = "provider_error"
+    MALFORMED = "malformed"
+    EVIDENCE_UNSUPPORTED = "evidence_unsupported"
+    UNEXPECTED = "unexpected"
+    NO_RECORDED_OUTPUT = "no_recorded_output"  # replay cache miss
+    EMPTY_INPUT = "empty_input"
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +119,8 @@ class PromptRow(Base):
     prompt_id: Mapped[str] = mapped_column(String(128), index=True)
     run_id: Mapped[str] = mapped_column(String(64), index=True)
     text: Mapped[str] = mapped_column(Text)
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    raw_json: Mapped[str] = mapped_column(Text)
 
     responses: Mapped[list[ResponseRow]] = relationship(back_populates="prompt")
 
@@ -129,13 +143,15 @@ class ResponseRow(Base):
     model_version: Mapped[str | None] = mapped_column(String(128), nullable=True)
     answer_text: Mapped[str] = mapped_column(Text)
     answer_markdown: Mapped[str | None] = mapped_column(Text, nullable=True)
-    capture_status: Mapped[str] = mapped_column(String(32), default="captured")
+    capture_status: Mapped[str] = mapped_column(String(32))
     provider_timestamp: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    archive_stored_at: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    archive_stored_at: Mapped[str] = mapped_column(String(64))
     settings: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     capture_route: Mapped[str | None] = mapped_column(Text, nullable=True)
     provider_api_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
     provider_task_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    raw_json: Mapped[str] = mapped_column(Text)
     dataset_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("datasets.id"), index=True
     )
@@ -154,6 +170,7 @@ class CitationRow(Base):
     __tablename__ = "citations"
     __table_args__ = (
         UniqueConstraint("citation_id", name="uq_citations_citation_id"),
+        UniqueConstraint("response_id", "order", name="uq_citations_response_order"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
@@ -170,14 +187,18 @@ class CitationRow(Base):
     domain: Mapped[str | None] = mapped_column(String(255), nullable=True)
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
     publication_date: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    raw_json: Mapped[str] = mapped_column(Text)
 
     response: Mapped[ResponseRow] = relationship(back_populates="citations")
 
 
 class RejectedRecord(Base):
-    """Rows that failed Pydantic validation during ingestion.
+    """Rows that failed Pydantic validation or referential checks.
 
     Stored so one bad record never erases valid results (brief requirement).
+    Carries the line number, source file, raw payload, and error message
+    so the caller can audit exactly what was rejected and why.
     """
 
     __tablename__ = "rejected_records"
@@ -187,8 +208,11 @@ class RejectedRecord(Base):
         String(36), ForeignKey("datasets.id"), index=True
     )
     source_file: Mapped[str] = mapped_column(Text)
+    line_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    record_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     raw_payload: Mapped[str] = mapped_column(Text)
     error: Mapped[str] = mapped_column(Text)
+    rejection_type: Mapped[str] = mapped_column(String(32), default="validation")
     rejected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
@@ -207,6 +231,8 @@ class AnalysisRun(Base):
     execution_mode: Mapped[ExecutionMode] = mapped_column(SAEnum(ExecutionMode, values_callable=lambda e: [x.value for x in e]))
     model_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     prompt_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    scoring_version: Mapped[str] = mapped_column(String(32), default="v2")
+    category_version: Mapped[str] = mapped_column(String(32), default="v1")
     status: Mapped[str] = mapped_column(String(32), default="pending")  # pending/running/completed/failed
     total: Mapped[int] = mapped_column(Integer, default=0)
     successful: Mapped[int] = mapped_column(Integer, default=0)
@@ -225,7 +251,8 @@ class ResponseResult(Base):
     """Classification + evidence for one ResponseRow.
 
     `failed=True` means the LLM produced no usable classification —
-    this is NOT a successful zero-score observation.
+    this is NOT a successful zero-score observation. Every one of the
+    150 responses must end as `success`, `failed`, or `skipped`.
     """
 
     __tablename__ = "response_results"
@@ -243,24 +270,30 @@ class ResponseResult(Base):
     prompt_id: Mapped[str] = mapped_column(String(128), index=True)
     engine: Mapped[Engine] = mapped_column(SAEnum(Engine, values_callable=lambda e: [x.value for x in e]))
 
-    # Labels (the LLM-produced judgment)
+    # ---- Deterministic Facts (computed in code, never sent for LLM judgment) ----
+    # mention comes from regex; LLM cannot override it. disagreement_flag is
+    # set if the LLM's mention disagrees with the regex (regex wins).
     mention: Mapped[bool] = mapped_column(Boolean, default=False)
+    mention_disagreement: Mapped[bool] = mapped_column(Boolean, default=False)
+    mention_spans: Mapped[list[dict[str, int]]] = mapped_column(JSON, default=list)
+    prompt_names_brand: Mapped[bool] = mapped_column(Boolean, default=False)
+    prompt_category: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    competitors_known: Mapped[list[str]] = mapped_column(JSON, default=list)
+
+    # ---- LLM Judgment (only these come from the LLM) ---------------------------
     recommendation: Mapped[bool] = mapped_column(Boolean, default=False)
     negative_characterisation: Mapped[bool] = mapped_column(Boolean, default=False)
     recommendation_position: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    competitors_named: Mapped[list[str]] = mapped_column(JSON, default=list)
-    competitors_observed_count: Mapped[int] = mapped_column(Integer, default=0)
+    competitors_extra: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # One evidence excerpt per true label (mention/recommendation/negative)
+    evidence_mention: Mapped[str] = mapped_column(Text, default="")
+    evidence_recommendation: Mapped[str] = mapped_column(Text, default="")
+    evidence_negative: Mapped[str] = mapped_column(Text, default="")
 
-    # Evidence — exact excerpt + char offset (grader verifies it exists)
-    evidence_excerpt: Mapped[str] = mapped_column(Text, default="")
-    char_offset_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    char_offset_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
-
-    # Deterministic citation facts (computed before LLM)
+    # Citation facts (deterministic)
     citation_count_for_response: Mapped[int] = mapped_column(Integer, default=0)
     unique_citation_count: Mapped[int] = mapped_column(Integer, default=0)
     has_kasparro_citation: Mapped[bool] = mapped_column(Boolean, default=False)
-    kasparro_domain_in_citations: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # Score components (filled by scoring step)
     mention_score: Mapped[float] = mapped_column(Float, default=0.0)
@@ -270,18 +303,28 @@ class ResponseResult(Base):
     position_score: Mapped[float] = mapped_column(Float, default=0.0)
     composite_score: Mapped[float] = mapped_column(Float, default=0.0)
 
-    # Failure handling — never manufacture confident results
+    # ---- Failure handling — never manufacture confident results ----------------
     failed: Mapped[bool] = mapped_column(Boolean, default=False)
-    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     skipped: Mapped[bool] = mapped_column(Boolean, default=False)
+    error_code: Mapped[ErrorCode | None] = mapped_column(
+        SAEnum(ErrorCode, values_callable=lambda e: [x.value for x in e]),
+        nullable=True,
+    )
+    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     skip_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    # Traceability — every output labeled with execution mode
+    # ---- Traceability — every output labeled with actual execution mode --------
+    # execution_mode records the ACTUAL mode used (e.g. live if a call succeeded
+    # live, stub if it fell back). model_name is per-call, not per-adapter.
     execution_mode: Mapped[ExecutionMode] = mapped_column(SAEnum(ExecutionMode, values_callable=lambda e: [x.value for x in e]))
     model_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
     latency_ms: Mapped[int] = mapped_column(Integer, default=0)
     raw_llm_output: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     prompt_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    scoring_version: Mapped[str] = mapped_column(String(32), default="v1")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     run: Mapped[AnalysisRun] = relationship(back_populates="results")
@@ -299,6 +342,14 @@ class ReportVersion(Base):
     Editing a submitted/approved version spawns a new draft with
     `parent_version_id` pointing back. Old approvals authorise export
     only of that specific immutable older version.
+
+    Concurrency: lock_version is incremented on every state transition.
+    Callers must pass their observed lock_version; mismatch → 409
+    concurrent_modification (catches two reviewers deciding at once).
+
+    Integrity: content_hash is computed at submit time from the
+    canonical JSON of (title, findings, diagnostics, remedies). Verified
+    at export to detect tampering between submit and export.
     """
 
     __tablename__ = "report_versions"
@@ -319,6 +370,13 @@ class ReportVersion(Base):
     diagnostics: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     remedies: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     scores: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    notes: Mapped[str] = mapped_column(Text, default="")
+    # Optimistic locking: callers must send their observed lock_version
+    # with every state transition. Mismatch → 409 concurrent_modification.
+    lock_version: Mapped[int] = mapped_column(Integer, default=0)
+    # content_hash is computed at submit time over (title, findings,
+    # diagnostics, remedies). Verified at export to detect tampering.
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_by: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -1,9 +1,9 @@
 """Evaluation grader.
 
 Computes per-label precision/recall/F1 against hand-labeled cases,
-verifies the deterministic score math separately, and checks that
-diagnostic claims have supporting response_id evidence (the
-unsupported-claim guardrail).
+verifies the deterministic Facts (mention, prompt_names_brand, competitors)
+separately from the LLM Judgment, and checks that diagnostic claims
+have supporting response_id evidence (the unsupported-claim guardrail).
 
 Per the brief: "an LLM judging its own prose is insufficient" —
 labels are exact-match against hand-labeled expected values.
@@ -15,8 +15,17 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from kasparro_auditor.llm.adapter import LLMContext, LLMError, verify_evidence
-from kasparro_auditor.schemas.results import ClassificationResult
+from kasparro_auditor.llm.adapter import (
+    LLMContext,
+    LLMError,
+    Judgment,
+    verify_evidence,
+)
+from kasparro_auditor.scoring.facts import (
+    compute_mention,
+    compute_competitors,
+)
+from kasparro_auditor.scoring.prompt_categories import prompt_names_brand
 
 CASES_PATH = Path(__file__).resolve().parent / "cases.jsonl"
 
@@ -34,8 +43,9 @@ class EvalCase:
     prompt_category: str
     is_tuning: bool
     is_custom: bool
-    expected: ClassificationResult
-    raw_expected: dict
+    expected_facts: dict
+    expected_judgment: Judgment
+    expected_failed: bool
     edge_case_description: str | None = None
 
 
@@ -46,26 +56,11 @@ def load_cases(path: Path = CASES_PATH) -> list[EvalCase]:
         if not line:
             continue
         d = json.loads(line)
-        # The evidence_excerpt lives at the top level of each case record
-        # (not nested under 'expected'). We copy it into the expected
-        # ClassificationResult so verify_evidence can check it.
-        evidence_excerpt = d.get("evidence_excerpt", "") or ""
-        expected_dict = d["expected"]
-        expected_dict["evidence_excerpt"] = evidence_excerpt
-        # Provide sensible defaults for the offset fields if not given.
-        expected_dict.setdefault("char_offset_start", 0)
-        expected_dict.setdefault("char_offset_end", max(0, len(evidence_excerpt)))
-        expected_dict.setdefault("recommendation_position", None)
-        expected = ClassificationResult(
-            mention=expected_dict.get("mention", False),
-            recommendation=expected_dict.get("recommendation", False),
-            negative_characterisation=expected_dict.get("negative_characterisation", False),
-            recommendation_position=expected_dict.get("recommendation_position"),
-            competitors_named=expected_dict.get("competitors_named", []),
-            evidence_excerpt=evidence_excerpt,
-            char_offset_start=expected_dict["char_offset_start"],
-            char_offset_end=expected_dict["char_offset_end"],
-        )
+        j_dict = d["expected_judgment"]
+        # Don't validate via Judgment yet — the grader needs to compare
+        # the classifier's output to the expected labels, and we want to
+        # catch disagreements, not raise on construction.
+        expected_judgment = Judgment.model_validate(j_dict)
         cases.append(
             EvalCase(
                 case_id=d["case_id"],
@@ -74,8 +69,9 @@ def load_cases(path: Path = CASES_PATH) -> list[EvalCase]:
                 prompt_category=d.get("prompt_category", "unknown"),
                 is_tuning=d.get("is_tuning", False),
                 is_custom=d.get("is_custom", False),
-                expected=expected,
-                raw_expected=d["expected"],
+                expected_facts=d["expected_facts"],
+                expected_judgment=expected_judgment,
+                expected_failed=d.get("expected_failed", False),
                 edge_case_description=d.get("edge_case_description"),
             )
         )
@@ -83,9 +79,7 @@ def load_cases(path: Path = CASES_PATH) -> list[EvalCase]:
 
 
 # ---------------------------------------------------------------------------
-# Synthetic answer text — for cases not in the real pack, we synthesize
-# minimal text that contains the expected evidence excerpt. Real cases
-# (like case-01) load the actual answer_text from the data pack.
+# Synthetic answer text — for cases not in the real pack
 # ---------------------------------------------------------------------------
 
 
@@ -107,36 +101,38 @@ def _load_real_answer_text(response_id: str) -> str | None:
 
 
 def _synthesize_answer_text(case: EvalCase) -> str:
-    """For stub cases, build a minimal answer text containing the evidence.
-
-    For cases with a non-empty expected evidence_excerpt, embed it verbatim
-    so the adapter has something to find. For empty/expected-failed cases,
-    return a near-empty string.
-    """
-    if case.expected.evidence_excerpt and len(case.expected.evidence_excerpt) >= 10:
-        # Embed the expected excerpt plus padding so the adapter has
-        # something to anchor on.
-        return (
-            f"This is a synthesized answer for {case.case_id}. "
-            f"{case.expected.evidence_excerpt} "
-            f"Additional context for the answer goes here."
-        )
-    if case.raw_expected.get("failed"):
-        # Expected failure: minimal/empty text
-        return ""
-    return f"This is a synthesized answer for {case.case_id} with no specific evidence."
+    """For stub cases, build a minimal answer text containing the evidence."""
+    excerpts = [
+        case.expected_judgment.evidence_mention,
+        case.expected_judgment.evidence_recommendation,
+        case.expected_judgment.evidence_negative,
+    ]
+    parts = [f"This is a synthesized answer for {case.case_id}."]
+    for excerpt in excerpts:
+        if excerpt and len(excerpt) >= 10:
+            parts.append(excerpt)
+    if case.expected_facts.get("competitors_known"):
+        comps = case.expected_facts["competitors_known"]
+        parts.append(f"Other tools mentioned: {', '.join(comps)}.")
+    parts.append("Additional context for the answer goes here.")
+    return " ".join(parts)
 
 
 def build_context(case: EvalCase) -> LLMContext:
     """Build the LLMContext for an eval case."""
     text = _load_real_answer_text(case.response_id) or _synthesize_answer_text(case)
+    # Compute deterministic Facts here so the LLM doesn't have to
+    mention, _spans = compute_mention(text)
+    competitors = compute_competitors(text)
     return LLMContext(
         response_id=case.response_id,
         prompt_id=f"eval:{case.case_id}",
         engine=case.engine,
-        prompt_text=f"(eval case {case.case_id})",
+        prompt_text=f"(eval case {case.case_id}) — does kasparro work?",
         answer_text=text,
-        competitor_hints=[],
+        mention=mention,
+        prompt_names_brand=prompt_names_brand(f"does kasparro work?"),
+        competitors_known=competitors,
     )
 
 
@@ -174,6 +170,7 @@ class GraderReport:
     failed: int = 0
     skipped: int = 0
     label_metrics: dict[str, LabelMetrics] = field(default_factory=dict)
+    facts_metrics: dict[str, LabelMetrics] = field(default_factory=dict)
     unsupported_claim_failures: list[str] = field(default_factory=list)
     per_case_results: list[dict] = field(default_factory=list)
 
@@ -187,19 +184,42 @@ def grade(
     import asyncio
 
     metrics = {
-        "mention": LabelMetrics("mention"),
         "recommendation": LabelMetrics("recommendation"),
         "negative_characterisation": LabelMetrics("negative_characterisation"),
+    }
+    facts_metrics = {
+        "mention": LabelMetrics("mention"),
+        "prompt_names_brand": LabelMetrics("prompt_names_brand"),
     }
     report = GraderReport(classifier_name=classifier_name)
 
     async def _run_case(case: EvalCase) -> dict:
         ctx = build_context(case)
         try:
+            # Verify Facts first (deterministic, should never fail)
+            mention, _ = compute_mention(ctx.answer_text)
+            if mention != case.expected_facts.get("mention", False):
+                if mention and not case.expected_facts.get("mention", False):
+                    facts_metrics["mention"].fp += 1
+                elif not mention and case.expected_facts.get("mention", False):
+                    facts_metrics["mention"].fn += 1
+            else:
+                if mention:
+                    facts_metrics["mention"].tp += 1
+
+            # Skip LLM call if mention is False (matches pipeline behavior)
+            if not case.expected_facts.get("mention", False):
+                report.successful += 1
+                return {
+                    "case_id": case.case_id,
+                    "status": "ok_skipped_llm",
+                    "facts": {"mention": mention},
+                }
+
             result = await classifier.classify(ctx)
             # Verify evidence (unsupported-claim guardrail)
             try:
-                verify_evidence(result, ctx.answer_text)
+                verify_evidence(result, ctx.answer_text, response_id=case.response_id)
             except Exception as e:
                 report.unsupported_claim_failures.append(
                     f"{case.case_id}: evidence verification failed: {e}"
@@ -210,10 +230,10 @@ def grade(
                     "error": str(e),
                 }
 
-            # Score against expected labels
+            # Score against expected judgment labels
             for label in metrics:
                 got = getattr(result, label)
-                exp = getattr(case.expected, label)
+                exp = getattr(case.expected_judgment, label)
                 if got and exp:
                     metrics[label].tp += 1
                 elif got and not exp:
@@ -226,11 +246,11 @@ def grade(
                 "case_id": case.case_id,
                 "status": "ok",
                 "got": result.model_dump(),
-                "expected": case.expected.model_dump(),
+                "expected": case.expected_judgment.model_dump(),
             }
         except LLMError as e:
             report.failed += 1
-            if case.raw_expected.get("failed"):
+            if case.expected_failed:
                 # Expected failure — counts as success
                 report.successful += 1
                 report.failed -= 1
@@ -253,6 +273,7 @@ def grade(
 
     report.total_cases = len(results)
     report.label_metrics = metrics
+    report.facts_metrics = facts_metrics
     report.per_case_results = list(results)
     return report
 
@@ -263,7 +284,11 @@ def format_report(reports: list[GraderReport]) -> str:
     lines.append("# Evaluation Comparison Report\n")
     lines.append(
         "Per-label precision/recall/F1 across the hand-labeled eval cases.\n"
-        "Final-check cases (is_tuning=false) only. Tuning cases shown separately.\n"
+        "Final-check cases (is_tuning=false) only. Tuning cases shown separately.\n\n"
+        "**Architecture**: Facts (mention, prompt_names_brand, competitors_known) "
+        "are computed deterministically in code. The LLM only returns Judgment "
+        "fields (recommendation, negative, position, evidence). LLM calls are "
+        "skipped entirely when the deterministic mention check returns False.\n"
     )
 
     for r in reports:
@@ -275,7 +300,17 @@ def format_report(reports: list[GraderReport]) -> str:
         if r.unsupported_claim_failures:
             for f in r.unsupported_claim_failures:
                 lines.append(f"  - {f}")
-        lines.append("\n| Label | Precision | Recall | F1 |")
+
+        lines.append("\n### Deterministic Facts metrics\n")
+        lines.append("| Fact | Precision | Recall | F1 |")
+        lines.append("|---|---|---|---|")
+        for label, m in r.facts_metrics.items():
+            lines.append(
+                f"| {label} | {m.precision:.3f} | {m.recall:.3f} | {m.f1:.3f} |"
+            )
+
+        lines.append("\n### LLM Judgment metrics\n")
+        lines.append("| Label | Precision | Recall | F1 |")
         lines.append("|---|---|---|---|")
         for label, m in r.label_metrics.items():
             lines.append(
@@ -285,9 +320,12 @@ def format_report(reports: list[GraderReport]) -> str:
 
     lines.append("\n## Grader limits\n")
     lines.append(
-        "- The grader uses exact-match labels against hand-labeled expected values.\n"
+        "- Facts (mention, prompt_names_brand, competitors_known) are computed "
+        "deterministically and graded as exact-match against hand-labeled values.\n"
+        "- LLM Judgment labels (recommendation, negative) are graded as "
+        "exact-match against hand-labeled values.\n"
         "- An LLM judging its own prose is explicitly insufficient (brief requirement).\n"
-        "- Competitor extraction is evaluated as set-overlap, not exact match.\n"
+        "- Evidence excerpts are verified as verbatim substrings of answer_text.\n"
         "- Score-component arithmetic is verified separately in tests/test_scoring.py.\n"
         "- Diagnostic claims have supporting response_id evidence verified at synth time.\n"
     )

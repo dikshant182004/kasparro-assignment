@@ -8,34 +8,62 @@ from __future__ import annotations
 
 import re
 
-from kasparro_auditor.llm.adapter import LLMContext, verify_evidence
-from kasparro_auditor.llm.stub_adapter import (
-    KNOWN_COMPETITORS,
-    _NEG_PATTERNS,
-    _POSITION_PATTERNS,
-    _REC_PATTERNS,
-    _canonical_competitor,
-    _pick_evidence,
+from kasparro_auditor.llm.adapter import (
+    LLMContext,
+    Judgment,
+    verify_evidence,
 )
-from kasparro_auditor.schemas.results import ClassificationResult
+from kasparro_auditor.scoring.competitors import COMPETITOR_ALIASES
+from kasparro_auditor.scoring.facts import compute_competitors
+from kasparro_auditor.llm.stub_adapter import _pick_evidence, _pick_evidence_for_pattern
+
+# Heuristics for negative characterisation (same as StubAdapter)
+_NEG_PATTERNS = [
+    r"\b(?:not\s+(?:legit|legitimate|real|worth\s+it))\b",
+    r"\bgimmick\b",
+    r"\bhype\b",
+    r"\bscam\b",
+    r"\boverpriced\b",
+    r"\bskept(?:ic(?:al)?)?\b",
+    r"\b(?:empty\s+promises|all\s+hype)\b",
+    r"\bnot\s+(?:widely\s+recognized|well\s+known)\b",
+]
+
+# Heuristics for recommendation
+_REC_PATTERNS = [
+    r"\bkasparro\s+is\s+(?:the\s+)?(?:best|top|recommended|worth|great|good)\b",
+    r"\brecommend\s+kasparro\b",
+    r"\bkasparro\s+is\s+a\s+(?:great|good|strong|solid)\s+(?:choice|option|fit)\b",
+    r"\b(?:top\s+pick|best\s+option)[^.]*\bkasparro\b",
+    r"\bkasparro\s+stands\s+out\b",
+]
+
+# Numeric position pattern
+_POSITION_PATTERNS = [
+    r"(?:^|\n)\s*(\d{1,2})[.)]\s*[A-Z][^\n]{0,40}\bKasparro\b",
+    r"\bKasparro\b[^\n]{0,40}\((\d{1,2})(?:st|nd|rd|th)?\)",
+]
 
 
 class RuleBaseline:
-    """Even simpler than the StubAdapter — no LLM, pure regex only.
+    """Even simpler than the StubAdapter — pure regex only, no Facts.
 
     Used as the 'simple rule-based baseline' the brief asks to compare
-    against. Differs from StubAdapter in that it does NOT pick
-    evidence via sentence-boundary heuristics — it uses the first
-    200 chars around the brand mention.
+    against. Differs from StubAdapter in that it computes its own mention
+    flag and competitor list inline (doesn't use the Facts layer).
     """
 
     name = "rule-baseline-v1"
+    mode = "stub"
+    model_name = "rule-baseline-v1"
 
-    async def classify(self, ctx: LLMContext) -> ClassificationResult:
+    async def classify(self, ctx: LLMContext) -> Judgment:
         text = ctx.answer_text
         lower = text.lower()
 
+        # Baseline uses its own regex for mention (independent of Facts)
         mention = "kasparro" in lower
+        # Baseline doesn't compute spans — just the boolean
         recommendation = any(
             re.search(p, text, flags=re.IGNORECASE | re.MULTILINE) for p in _REC_PATTERNS
         )
@@ -51,36 +79,32 @@ class RuleBaseline:
                         pass
                     break
 
-        competitors: list[str] = []
-        seen = set()
-        for name in KNOWN_COMPETITORS:
-            if name in lower:
-                canon = _canonical_competitor(name)
-                if canon not in seen:
-                    competitors.append(canon)
-                    seen.add(canon)
+        # Use the same competitor matcher as the Facts layer
+        competitors_known = compute_competitors(text)
+        competitors_extra: list[str] = []  # baseline doesn't differentiate
 
-        # Baseline evidence: ±100 chars around first Kasparro mention
-        evidence = _pick_evidence(text, "kasparro")
-        if not evidence:
-            evidence = text[:200]
+        evidence_mention = _pick_evidence(text, "kasparro") if mention else ""
+        evidence_recommendation = _pick_evidence(text, "kasparro") if recommendation else ""
+        evidence_negative = ""
+        if negative:
+            for p in _NEG_PATTERNS:
+                m = re.search(p, text, flags=re.IGNORECASE | re.MULTILINE)
+                if m:
+                    start = max(0, m.start() - 100)
+                    end = min(len(text), m.end() + 100)
+                    evidence_negative = text[start:end].strip()
+                    break
 
-        start = text.find(evidence)
-        end = start + len(evidence)
-        if start == -1:
-            evidence = text[:200]
-            start = 0
-            end = min(200, len(text))
-
-        result = ClassificationResult(
-            mention=mention,
+        result = Judgment(
             recommendation=recommendation,
             negative_characterisation=negative,
             recommendation_position=position,
-            competitors_named=competitors,
-            evidence_excerpt=evidence,
-            char_offset_start=start,
-            char_offset_end=end,
+            competitors_extra=competitors_extra,
+            evidence_mention=evidence_mention,
+            evidence_recommendation=evidence_recommendation,
+            evidence_negative=evidence_negative,
         )
         verify_evidence(result, text)
+        result._model_used = self.model_name  # type: ignore[attr-defined]
+        result._attempts = 1  # type: ignore[attr-defined]
         return result

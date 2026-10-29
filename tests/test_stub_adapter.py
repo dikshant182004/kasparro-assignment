@@ -4,99 +4,114 @@ from __future__ import annotations
 import pytest
 
 from kasparro_auditor.llm.adapter import (
+    EvidenceUnsupported,
     LLMContext,
     MalformedLLMOutput,
+    Judgment,
     verify_evidence,
 )
-from kasparro_auditor.llm.stub_adapter import StubAdapter
-from kasparro_auditor.schemas.results import ClassificationResult
 
 
-def _ctx(text: str, response_id: str = "r-test") -> LLMContext:
+def _ctx(text: str, response_id: str = "r-test", mention: bool = True) -> LLMContext:
     return LLMContext(
         response_id=response_id,
         prompt_id="p-test",
         engine="chatgpt",
         prompt_text="does kasparro work?",
         answer_text=text,
-        competitor_hints=["profound", "otterly ai"],
+        mention=mention,
+        prompt_names_brand=True,
+        competitors_known=["profound"],
+    )
+
+
+def _judgment(
+    recommendation: bool = False,
+    negative: bool = False,
+    position: int | None = None,
+    competitors_extra: list[str] | None = None,
+    evidence_mention: str = "",
+    evidence_recommendation: str = "",
+    evidence_negative: str = "",
+) -> Judgment:
+    return Judgment(
+        recommendation=recommendation,
+        negative_characterisation=negative,
+        recommendation_position=position,
+        competitors_extra=competitors_extra or [],
+        evidence_mention=evidence_mention,
+        evidence_recommendation=evidence_recommendation,
+        evidence_negative=evidence_negative,
     )
 
 
 def test_verify_evidence_accepts_genuine_excerpt():
     text = "Kasparro is a great AI visibility tool for B2B SaaS companies."
-    result = ClassificationResult(
-        mention=True,
+    j = _judgment(
         recommendation=True,
-        negative_characterisation=False,
-        recommendation_position=1,
-        competitors_named=["profound"],
-        evidence_excerpt="Kasparro is a great AI visibility tool",
-        char_offset_start=0,
-        char_offset_end=38,
+        evidence_mention="Kasparro is a great AI visibility tool",
+        evidence_recommendation="Kasparro is a great AI visibility tool",
     )
-    verify_evidence(result, text)  # does not raise
+    verify_evidence(j, text)  # does not raise
 
 
 def test_verify_evidence_rejects_nonexistent_excerpt():
     text = "Kasparro is mentioned here in a longer answer for testing."
-    result = ClassificationResult(
-        mention=True,
-        recommendation=False,
-        negative_characterisation=False,
-        recommendation_position=None,
-        competitors_named=[],
-        evidence_excerpt="This excerpt does not appear in the answer at all.",
-        char_offset_start=0,
-        char_offset_end=50,
+    j = _judgment(
+        evidence_mention="This excerpt does not appear in the answer at all.",
     )
-    with pytest.raises(MalformedLLMOutput):
-        verify_evidence(result, text)
+    with pytest.raises(EvidenceUnsupported):
+        verify_evidence(j, text)
 
 
-def test_verify_evidence_rejects_short_excerpt():
-    text = "Kasparro is mentioned here in a longer answer for testing."
-    result = ClassificationResult(
-        mention=True,
-        recommendation=False,
-        negative_characterisation=False,
-        recommendation_position=None,
-        competitors_named=[],
-        evidence_excerpt="short",
-        char_offset_start=0,
-        char_offset_end=5,
+def test_verify_evidence_rejects_long_excerpt():
+    text = "Kasparro is mentioned here."
+    j = _judgment(
+        evidence_mention="x" * 400,  # > 300 chars
     )
-    with pytest.raises(MalformedLLMOutput):
-        verify_evidence(result, text)
+    with pytest.raises(EvidenceUnsupported, match="300"):
+        verify_evidence(j, text)
 
 
-def test_verify_evidence_rejects_mismatched_offsets():
-    text = "Kasparro is mentioned here in this answer."
-    result = ClassificationResult(
-        mention=True,
-        recommendation=False,
-        negative_characterisation=False,
-        recommendation_position=None,
-        competitors_named=[],
-        evidence_excerpt="Kasparro is mentioned here",
-        char_offset_start=5,  # wrong
-        char_offset_end=28,
-    )
-    with pytest.raises(MalformedLLMOutput, match="char_offset_start/end"):
-        verify_evidence(result, text)
+def test_verify_evidence_allows_empty_when_label_false():
+    text = "Some answer text without Kasparro."
+    j = _judgment()  # all labels False, all evidence empty
+    verify_evidence(j, text)  # does not raise
+
+
+def test_judgment_cross_field_validator_evidence_required_when_recommendation():
+    """Judgment should reject recommendation=True without evidence_recommendation."""
+    with pytest.raises(ValueError, match="evidence_recommendation is required"):
+        Judgment(
+            recommendation=True,
+            negative_characterisation=False,
+            evidence_mention="Kasparro is mentioned.",
+            evidence_recommendation="",  # missing
+        )
+
+
+def test_judgment_cross_field_validator_evidence_required_when_negative():
+    """Judgment should reject negative=True without evidence_negative."""
+    with pytest.raises(ValueError, match="evidence_negative is required"):
+        Judgment(
+            recommendation=False,
+            negative_characterisation=True,
+            evidence_mention="Kasparro is mentioned.",
+            evidence_negative="",  # missing
+        )
 
 
 @pytest.mark.asyncio
-async def test_stub_adapter_classifies_mention():
+async def test_stub_adapter_classifies_mention_and_recommendation():
     text = (
-        "Based on my research, Kasparro is a great option for tracking AI visibility. "
+        "Kasparro is a great option for tracking AI visibility. "
         "It is the top pick among B2B SaaS tools."
     )
-    adapter = StubAdapter()
+    adapter = _make_stub()
     result = await adapter.classify(_ctx(text))
-    assert result.mention is True
     assert result.recommendation is True
-    assert result.evidence_excerpt in text
+    assert result.evidence_mention in text
+    assert result.evidence_recommendation in text
 
 
 @pytest.mark.asyncio
@@ -105,22 +120,14 @@ async def test_stub_adapter_detects_negative():
         "Kasparro is mentioned but it's just hype and not legit. "
         "Several users call it a gimmick."
     )
-    adapter = StubAdapter()
+    adapter = _make_stub()
     result = await adapter.classify(_ctx(text))
-    assert result.mention is True
     assert result.negative_characterisation is True
     assert result.recommendation is False
+    assert result.evidence_negative in text
 
 
-@pytest.mark.asyncio
-async def test_stub_adapter_handles_absence():
-    text = (
-        "There are several tools in the AI visibility space including "
-        "Profound and Otterly AI. The best option depends on use case."
-    )
-    adapter = StubAdapter()
-    result = await adapter.classify(_ctx(text))
-    assert result.mention is False
-    assert result.recommendation is False
-    assert "profound" in result.competitors_named
-    assert "otterly ai" in result.competitors_named
+def _make_stub():
+    """Build a StubAdapter without triggering circular imports."""
+    from kasparro_auditor.llm.stub_adapter import StubAdapter
+    return StubAdapter()

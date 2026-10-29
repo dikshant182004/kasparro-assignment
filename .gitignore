@@ -35,5 +35,10 @@ outputs/
 eval/results/
 
 # Assignment input packs (kept locally, never committed)
+# The brief says: "Keep supplied data and private outputs out of public Git history."
 data_pack/
+provenance/
+reference/
+schemas/
+fixtures/
 !data_pack/.gitkeep
