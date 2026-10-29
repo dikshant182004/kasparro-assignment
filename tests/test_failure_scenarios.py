@@ -11,7 +11,7 @@ FIXTURES_PATH = Path(__file__).resolve().parent.parent / "fixtures" / "failure_s
 
 def _load_scenarios() -> list[dict]:
     if not FIXTURES_PATH.is_file():
-        pytest.skip(f"failure_scenarios.json not found at {FIXTURES_PATH}")
+        return []
     return json.loads(FIXTURES_PATH.read_text(encoding="utf-8"))["scenarios"]
 
 
@@ -19,6 +19,7 @@ SCENARIOS = _load_scenarios()
 SCENARIO_IDS = [s["id"] for s in SCENARIOS]
 
 
+@pytest.mark.skipif(not SCENARIOS, reason="fixtures/failure_scenarios.json not present")
 @pytest.mark.parametrize("scenario", SCENARIOS, ids=SCENARIO_IDS)
 def test_failure_scenario_documented(scenario: dict) -> None:
     """Each scenario in the pack must be addressed by at least one test below."""
