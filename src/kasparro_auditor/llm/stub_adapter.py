@@ -1,8 +1,8 @@
 """Deterministic stub adapter for tests and offline eval.
 
 This is NOT a real LLM. It uses regex + simple heuristics to produce a
-plausible ClassificationResult so that the engineering pipeline (auth,
-state machine, scoring, export) can be tested without any API key.
+plausible Judgment so that the engineering pipeline (auth, state machine,
+scoring, export) can be tested without any API key.
 
 The grader deliberately compares this stub against the live model on
 the same eval cases — that gap is one of the things the brief asks to
@@ -11,32 +11,13 @@ report.
 from __future__ import annotations
 
 import re
-import time
 
-from kasparro_auditor.llm.adapter import LLMContext, MalformedLLMOutput, verify_evidence
-from kasparro_auditor.schemas.results import ClassificationResult
-
-# A short, conservative list of competitor names. Used both as hints and
-# for the stub's competitor extraction.
-KNOWN_COMPETITORS = [
-    "profound",
-    "otterly ai",
-    "otterly",
-    "peec ai",
-    "peec",
-    "athenahq",
-    "athena hq",
-    "dageno ai",
-    "dageno",
-    "authoritas",
-    "aeo checker",
-    "shareofmodel",
-    "waikay",
-    "rankscale",
-    "amionai",
-    "xfunnel",
-    "quno",
-]
+from kasparro_auditor.llm.adapter import (
+    LLMContext,
+    MalformedLLMOutput,
+    Judgment,
+    verify_evidence,
+)
 
 # Heuristics for negative characterisation.
 _NEG_PATTERNS = [
@@ -67,29 +48,21 @@ _POSITION_PATTERNS = [
 
 
 class StubAdapter:
-    """Deterministic stub. Used in tests and as a replay fallback."""
+    """Deterministic stub. Used in tests and as the eval baseline."""
 
     mode = "stub"
     model_name = "stub-v1"
 
-    async def classify(self, ctx: LLMContext) -> ClassificationResult:
+    async def classify(self, ctx: LLMContext) -> Judgment:
         text = ctx.answer_text
         lower = text.lower()
-        brand = "kasparro"
-        brand_lower = brand
 
-        # Mention
-        mention = brand_lower in lower
-
-        # Recommendation — conservative
+        # The stub has access to ctx.mention (computed deterministically).
+        # recommendation/negative are the stub's "judgment".
         recommendation = any(
             re.search(p, text, flags=re.IGNORECASE | re.MULTILINE) for p in _REC_PATTERNS
         )
-
-        # Negative
-        negative = any(
-            re.search(p, lower, flags=re.MULTILINE) for p in _NEG_PATTERNS
-        )
+        negative = any(re.search(p, lower, flags=re.MULTILINE) for p in _NEG_PATTERNS)
 
         # Position — first matching pattern wins
         position: int | None = None
@@ -103,69 +76,49 @@ class StubAdapter:
                         pass
                     break
 
-        # Competitors actually mentioned in the text
-        competitors: list[str] = []
-        seen = set()
-        for name in KNOWN_COMPETITORS:
-            if name in lower and name not in seen:
-                # Coalesce to canonical name
-                canon = _canonical_competitor(name)
-                if canon not in seen:
-                    competitors.append(canon)
-                    seen.add(canon)
+        # competitors_extra: names mentioned in the text that are NOT already
+        # in ctx.competitors_known (which was computed deterministically).
+        # For the stub, we just return an empty list — the Facts layer
+        # already captures known competitors.
+        competitors_extra: list[str] = []
 
-        # Evidence — pick a sentence containing "Kasparro" (or first sentence)
-        evidence = _pick_evidence(text, brand)
-        if not evidence:
-            # No Kasparro in text: pick first 200 chars as evidence of absence
-            evidence = text[:200].strip()
-            if len(evidence) < 10:
+        # Evidence per true label
+        evidence_mention = ""
+        evidence_recommendation = ""
+        evidence_negative = ""
+
+        if ctx.mention:
+            evidence_mention = _pick_evidence(text, "kasparro")
+            if not evidence_mention:
+                # Brand was named by regex but we couldn't extract a sentence —
+                # this is a stub failure, not a real classification.
                 raise MalformedLLMOutput(
-                    "Answer text too short to extract evidence", response_id=ctx.response_id
+                    "Could not extract mention evidence despite regex match",
+                    response_id=ctx.response_id,
                 )
+        if recommendation:
+            evidence_recommendation = _pick_evidence(text, "kasparro")
+        if negative:
+            evidence_negative = _pick_evidence_for_pattern(text, _NEG_PATTERNS)
 
-        start = text.find(evidence)
-        end = start + len(evidence)
-        if start == -1:
-            # Fallback to the very first sentence
-            evidence = text.split(".")[0][:200].strip()
-            start = text.find(evidence)
-            end = start + len(evidence)
-
-        result = ClassificationResult(
-            mention=mention,
+        result = Judgment(
             recommendation=recommendation,
             negative_characterisation=negative,
             recommendation_position=position,
-            competitors_named=competitors,
-            evidence_excerpt=evidence,
-            char_offset_start=start,
-            char_offset_end=end,
+            competitors_extra=competitors_extra,
+            evidence_mention=evidence_mention,
+            evidence_recommendation=evidence_recommendation,
+            evidence_negative=evidence_negative,
         )
         # Stub verifies its own evidence so callers don't need to.
-        verify_evidence(result, text)
+        verify_evidence(result, text, response_id=ctx.response_id)
+        result._model_used = self.model_name  # type: ignore[attr-defined]
+        result._attempts = 1  # type: ignore[attr-defined]
         return result
 
 
-def _canonical_competitor(name: str) -> str:
-    """Map variants to one canonical form."""
-    name = name.lower().strip()
-    if name.startswith("otterly"):
-        return "otterly ai"
-    if name.startswith("peec"):
-        return "peec ai"
-    if name.startswith("athena"):
-        return "athenahq"
-    if name.startswith("dageno"):
-        return "dageno ai"
-    return name
-
-
 def _pick_evidence(text: str, brand: str) -> str:
-    """Return a verbatim substring containing `brand`, or '' if absent.
-
-    Prefers a full sentence; falls back to ±100 chars around the brand.
-    """
+    """Return a verbatim substring containing `brand`, or '' if absent."""
     lower = text.lower()
     idx = lower.find(brand.lower())
     if idx == -1:
@@ -176,9 +129,19 @@ def _pick_evidence(text: str, brand: str) -> str:
     sent_end = text.find(".", idx)
     sent_end = len(text) if sent_end == -1 else sent_end + 1
     candidate = text[sent_start:sent_end].strip()
-    # If the sentence is huge, trim to ±200 chars around the brand mention.
-    if len(candidate) > 400:
-        local_start = max(0, idx - sent_start - 200)
-        local_end = min(len(candidate), idx - sent_start + 200)
+    if len(candidate) > 300:
+        local_start = max(0, idx - sent_start - 150)
+        local_end = min(len(candidate), idx - sent_start + 150)
         candidate = candidate[local_start:local_end].strip()
     return candidate
+
+
+def _pick_evidence_for_pattern(text: str, patterns: list[str]) -> str:
+    """Return a verbatim substring around the first pattern match."""
+    for p in patterns:
+        m = re.search(p, text, flags=re.IGNORECASE | re.MULTILINE)
+        if m:
+            start = max(0, m.start() - 100)
+            end = min(len(text), m.end() + 100)
+            return text[start:end].strip()
+    return text[:200].strip()

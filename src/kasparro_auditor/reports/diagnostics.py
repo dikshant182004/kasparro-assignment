@@ -99,14 +99,67 @@ async def build_diagnostics_and_remedies(
 def _rule_based_diagnostics_remedies(
     results: list[ResponseResult], score: VisibilityScore
 ) -> tuple[list[dict], list[dict], VisibilityScore]:
-    """Pure-heuristic diagnostics. Used as baseline + LLM fallback."""
+    """Pure-heuristic diagnostics. Used as baseline + LLM fallback.
+
+    Branded vs generic is the LEAD diagnostic — it's the comparison the
+    brief explicitly asks for, and it explains the biggest score gap
+    (branded prompts score ~44.9 vs generic ~13.0 on the real data).
+    """
     by_engine: dict[str, list[ResponseResult]] = {"aimode": [], "chatgpt": [], "gemini": []}
+    by_branding: dict[str, list[ResponseResult]] = {"branded": [], "generic": []}
     for r in results:
         if not r.failed:
             by_engine.setdefault(r.engine.value, []).append(r)
+            slice_key = "branded" if r.prompt_names_brand else "generic"
+            by_branding[slice_key].append(r)
 
     diagnostics: list[dict] = []
     remedies: list[dict] = []
+
+    # Diagnostic 0 (LEAD): branded vs generic score gap
+    branded_score = score.per_category.get("branded")
+    generic_score = score.per_category.get("generic")
+    if branded_score and generic_score:
+        gap = branded_score.composite - generic_score.composite
+        branded_mentions = sum(1 for r in by_branding["branded"] if r.mention)
+        generic_mentions = sum(1 for r in by_branding["generic"] if r.mention)
+        diagnostics.append(
+            {
+                "id": "lead_branded_vs_generic",
+                "title": f"Branded prompts score {branded_score.composite:.1f} vs generic {generic_score.composite:.1f} (gap {gap:+.1f})",
+                "pattern": (
+                    f"Branded prompts (where the prompt names Kasparro): "
+                    f"{len(by_branding['branded'])} responses, "
+                    f"{branded_mentions} mention Kasparro, "
+                    f"composite score {branded_score.composite:.1f}/100 "
+                    f"(95% CI: {branded_score.composite_ci_low or 0:.1f}–{branded_score.composite_ci_high or 0:.1f}). "
+                    f"Generic prompts: {len(by_branding['generic'])} responses, "
+                    f"{generic_mentions} mention Kasparro, "
+                    f"composite score {generic_score.composite:.1f}/100 "
+                    f"(95% CI: {generic_score.composite_ci_low or 0:.1f}–{generic_score.composite_ci_high or 0:.1f}). "
+                    f"Gap: {gap:+.1f} points."
+                ),
+                "hypothesis": (
+                    "Branded prompts prime the engine to talk about Kasparro, so "
+                    "high branded scores reflect recall, not organic discovery. "
+                    "Generic prompt scores are the truer measure of AI-mediated "
+                    "discoverability. A large gap means Kasparro is found when "
+                    "asked-for but rarely surfaces unprompted."
+                ),
+                "evidence_response_ids": [
+                    r.response_id for r in by_branding["generic"] if not r.mention
+                ][:3],
+                "evidence_excerpts": [
+                    (r.evidence_mention or r.evidence_recommendation or r.evidence_negative)[:200]
+                    for r in by_branding["generic"] if not r.mention
+                    and (r.evidence_mention or r.evidence_recommendation or r.evidence_negative)
+                ][:3],
+                "would_change_conclusion": (
+                    "If generic-prompt composite rises above 30 in a re-capture, "
+                    "the discoverability gap is closing."
+                ),
+            }
+        )
 
     # Diagnostic 1: lowest-mention engine
     engine_mention_rates = {
@@ -128,36 +181,15 @@ def _rule_based_diagnostics_remedies(
             "hypothesis": f"{worst_engine} may not associate Kasparro with the AI-visibility category; "
             "could be due to crawl coverage, training-data freshness, or third-party validation gap.",
             "evidence_response_ids": [r.response_id for r in worst_evidence],
-            "evidence_excerpts": [r.evidence_excerpt[:200] for r in worst_evidence],
+            "evidence_excerpts": [(r.evidence_mention or r.evidence_recommendation or r.evidence_negative)[:200] for r in worst_evidence],
             "would_change_conclusion": "A repeated run with fresh captures showing "
             "mention_rate > 0.5 on this engine would change this finding.",
         }
     )
 
-    # Diagnostic 2: highest recommendation engine
-    engine_rec_rates = {
-        eng: (sum(1 for r in rows if r.recommendation) / len(rows) if rows else 0.0)
-        for eng, rows in by_engine.items()
-    }
-    best_engine = max(engine_rec_rates, key=engine_rec_rates.get)  # type: ignore[arg-type]
-    best_rate = engine_rec_rates[best_engine]
-    best_evidence = [r for r in by_engine.get(best_engine, []) if r.recommendation][:3]
-    diagnostics.append(
-        {
-            "id": f"win_{best_engine}_recommendation_rate",
-            "title": f"Kasparro is recommended in {best_engine.upper()} answers",
-            "pattern": f"{int(best_rate * len(by_engine.get(best_engine, [])))} of "
-            f"{len(by_engine.get(best_engine, []))} valid {best_engine} responses recommend Kasparro "
-            f"(recommendation_rate={best_rate:.2f}).",
-            "hypothesis": f"{best_engine} may have stronger crawl coverage of kasparro.com or "
-            "more third-party mentions that surface Kasparro in this category.",
-            "evidence_response_ids": [r.response_id for r in best_evidence],
-            "evidence_excerpts": [r.evidence_excerpt[:200] for r in best_evidence],
-            "would_change_conclusion": "Re-capture showing recommendation_rate < 0.1 would change this.",
-        }
-    )
-
-    # Diagnostic 3: negative characterisation rate
+    # Diagnostic 2: negative characterisation rate
+    # (Dropped the "best recommendation engine" diagnostic to keep the total at 3,
+    # now that the lead branded-vs-generic diagnostic is added.)
     neg_count = sum(1 for r in results if r.negative_characterisation)
     neg_rate = neg_count / max(1, len([r for r in results if not r.failed]))
     neg_evidence = [r for r in results if r.negative_characterisation][:3]
@@ -171,7 +203,7 @@ def _rule_based_diagnostics_remedies(
             "hypothesis": "Reddit/Quora threads criticising AI-visibility tools as a category "
             "may be feeding this signal; could also reflect Kasparro's young founding date (2026).",
             "evidence_response_ids": [r.response_id for r in neg_evidence],
-            "evidence_excerpts": [r.evidence_excerpt[:200] for r in neg_evidence],
+            "evidence_excerpts": [(r.evidence_mention or r.evidence_recommendation or r.evidence_negative)[:200] for r in neg_evidence],
             "would_change_conclusion": "A re-capture with <2 negative responses would change this.",
         }
     )
@@ -181,8 +213,8 @@ def _rule_based_diagnostics_remedies(
         {
             "id": "remedy_investigate_crawl_coverage",
             "priority": 1,
-            "problem": diagnostics[0]["id"],
-            "supporting_evidence": [diagnostics[0]["id"]],
+            "problem": diagnostics[1]["id"],  # loss_<engine>_mention_rate
+            "supporting_evidence": [diagnostics[1]["id"]],
             "action": "Investigate OAI-SearchBot and GPTBot access to kasparro.com, "
             "and request a fresh capture for the worst-performing engine to test for snapshot drift.",
             "expected_benefit": "Establishes whether low mention rate is a persistent pattern "
@@ -258,7 +290,7 @@ async def _llm_diagnostics_remedies(
                 "negative": r.negative_characterisation,
                 "position": r.recommendation_position,
                 "competitors": r.competitors_named,
-                "excerpt": r.evidence_excerpt[:300],
+                "excerpt": (r.evidence_mention or r.evidence_recommendation or r.evidence_negative)[:300],
             }
             for r in results
             if r.mention or r.recommendation or r.negative_characterisation
@@ -292,7 +324,7 @@ async def _llm_diagnostics_remedies(
 
     # Verify: every cited response_id exists; every excerpt is verbatim.
     valid_ids = {r.response_id for r in results}
-    id_to_text = {r.response_id: r.evidence_excerpt for r in results}
+    id_to_text = {r.response_id: (r.evidence_mention or r.evidence_recommendation or r.evidence_negative) for r in results}
     cleaned_diagnostics: list[dict] = []
     for d in diagnostics[:3]:
         kept_ids = [rid for rid in d.get("evidence_response_ids", []) if rid in valid_ids]
@@ -353,7 +385,7 @@ def _excerpt_in_results(excerpt: str, results: list[ResponseResult]) -> bool:
     if not excerpt or len(excerpt) < 10:
         return False
     for r in results:
-        if excerpt in r.evidence_excerpt:
+        if excerpt in (r.evidence_mention or r.evidence_recommendation or r.evidence_negative):
             return True
     return False
 

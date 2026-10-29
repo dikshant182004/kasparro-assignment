@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kasparro_auditor.db.models import CitationRow
@@ -40,19 +40,4 @@ async def compute_citation_facts(
         citation_count_for_response=raw_count,
         unique_citation_count=len(unique_urls),
         has_kasparro_citation=has_kasparro,
-    )
-
-
-async def total_citation_count(session: AsyncSession, dataset_id: str) -> int:
-    """Sanity check count for the dataset manifest."""
-    return int(
-        await session.scalar(
-            select(func.count())
-            .select_from(CitationRow)
-            .join(
-                # Citations don't carry dataset_id directly; count via responses
-                CitationRow.response_id,  # column reference for clarity
-            )
-        )
-        or 0
     )

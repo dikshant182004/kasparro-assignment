@@ -1,8 +1,8 @@
 """Schemas package."""
 from kasparro_auditor.schemas.inputs import CitationRecord, PromptRecord, ResponseRecord
 from kasparro_auditor.schemas.results import (
-    ClassificationResult,
     Diagnostic,
+    Judgment,
     Remedy,
     ResponseResultRead,
     VisibilityScore,
@@ -17,6 +17,7 @@ from kasparro_auditor.schemas.api import (
     ErrorResponse,
     ExportRead,
     HealthRead,
+    RejectedRecordRead,
     ReportPatch,
     ReportRead,
 )
@@ -25,8 +26,8 @@ __all__ = [
     "CitationRecord",
     "PromptRecord",
     "ResponseRecord",
-    "ClassificationResult",
     "Diagnostic",
+    "Judgment",
     "Remedy",
     "ResponseResultRead",
     "VisibilityScore",
@@ -39,6 +40,7 @@ __all__ = [
     "ErrorResponse",
     "ExportRead",
     "HealthRead",
+    "RejectedRecordRead",
     "ReportPatch",
     "ReportRead",
 ]

@@ -1,56 +1,72 @@
 """Pydantic result schemas.
 
-`ClassificationResult` is the structured-output contract the LLM must
-return. `ResponseResultRead` is the full DB row projection used by the
-API and grader.
+`Judgment` is the structured-output contract the LLM must return —
+only judgment fields, NOT facts (mention/competitors/citations are
+computed deterministically in scoring/facts.py).
+
+`ResponseResultRead` is the full DB row projection used by the API and grader.
+
+`VisibilityScore` (v2) — composite is Optional, with per-engine + per-category
+slices, weight sensitivity table, and an insufficient_data flag for all-failed runs.
 """
 from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-class ClassificationResult(BaseModel):
-    """Structured output contract enforced via Instructor + Groq JSON mode."""
+class Judgment(BaseModel):
+    """LLM structured-output schema. Facts are NOT here — only judgment.
+
+    The LLM does not return mention (computed by regex), competitors_known
+    (computed by alias matching), or citation counts (computed from the DB).
+    Cross-field validators enforce evidence-required-when-true.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    mention: bool = Field(
-        description="True if the answer names Kasparro anywhere in the text."
-    )
     recommendation: bool = Field(
-        description="True only if the answer presents Kasparro as a suitable option "
-        "for the question. A passing mention is NOT a recommendation."
+        description="True if the answer presents Kasparro as an option the user "
+        "should consider or choose. Conditional/hypothetical mentions and "
+        "'I couldn't find evidence' are NOT recommendations."
+    )
+    negative_characterisation: bool = Field(
+        description="True if the answer itself criticises or dismisses Kasparro. "
+        "Negated wording is NOT negative."
     )
     recommendation_position: int | None = Field(
         default=None,
-        description="1-based position if Kasparro is explicitly ranked or listed "
-        "among comparable options. Null if not ranked/listed (prose mention only).",
+        description="1-based rank ONLY if Kasparro is explicitly ranked/listed.",
         ge=1,
         le=20,
     )
-    negative_characterisation: bool = Field(
-        description="True if the answer criticises Kasparro, expresses scepticism, "
-        "calls it a gimmick/hype/scam, or otherwise characterises it negatively."
-    )
-    competitors_named: list[str] = Field(
+    competitors_extra: list[str] = Field(
         default_factory=list,
-        description="Lowercased names of competing AI-visibility tools explicitly "
-        "named in the answer (e.g. profound, otterly ai, peec ai, athenahq, dageno ai).",
+        description="Other provider names named verbatim in the answer, excluding "
+        "those already in competitors_known.",
     )
-    evidence_excerpt: str = Field(
-        description="An exact substring copied verbatim from the answer that supports "
-        "the labels above. Must be >= 10 characters and present verbatim."
+    evidence_mention: str = Field(
+        default="",
+        description="Verbatim excerpt (<=300 chars) supporting the mention label. "
+        "Required when mention=True (caller checks).",
     )
-    char_offset_start: int = Field(
-        description="Character offset in answer_text where evidence_excerpt begins.",
-        ge=0,
+    evidence_recommendation: str = Field(
+        default="",
+        description="Verbatim excerpt (<=300 chars) supporting recommendation=True.",
     )
-    char_offset_end: int = Field(
-        description="Character offset in answer_text where evidence_excerpt ends.",
-        ge=0,
+    evidence_negative: str = Field(
+        default="",
+        description="Verbatim excerpt (<=300 chars) supporting negative=True.",
     )
+
+    @model_validator(mode="after")
+    def _evidence_required_when_true(self) -> "Judgment":
+        if self.recommendation and not self.evidence_recommendation.strip():
+            raise ValueError("evidence_recommendation is required when recommendation=True")
+        if self.negative_characterisation and not self.evidence_negative.strip():
+            raise ValueError("evidence_negative is required when negative_characterisation=True")
+        return self
 
 
 class ResponseResultRead(BaseModel):
@@ -62,41 +78,92 @@ class ResponseResultRead(BaseModel):
     prompt_id: str
     engine: str
     mention: bool
+    mention_disagreement: bool
+    prompt_names_brand: bool
+    prompt_category: str | None
+    competitors_known: list[str]
     recommendation: bool
     negative_characterisation: bool
     recommendation_position: int | None
-    competitors_named: list[str]
-    evidence_excerpt: str
-    char_offset_start: int | None
-    char_offset_end: int | None
+    competitors_extra: list[str]
+    evidence_mention: str
+    evidence_recommendation: str
+    evidence_negative: str
     citation_count_for_response: int
     has_kasparro_citation: bool
     composite_score: float
     failed: bool
-    failure_reason: str | None
     skipped: bool
+    error_code: str | None
+    failure_reason: str | None
     skip_reason: str | None
     execution_mode: str
     model_name: str | None
+    attempts: int
+    prompt_tokens: int
+    completion_tokens: int
     latency_ms: int
 
 
-class VisibilityScore(BaseModel):
-    """Composite visibility score with components and uncertainty."""
+class EngineSlice(BaseModel):
+    """Per-engine score slice with denominators + CI."""
 
-    mention_rate: float
-    recommendation_rate: float
-    negative_rate: float
-    citation_rate: float
-    avg_position: float | None
     composite: float
-    composite_ci_low: float
-    composite_ci_high: float
+    composite_ci_low: float | None
+    composite_ci_high: float | None
+    denominator_valid: int
+    denominator_total: int
+    failed_count: int
+    skipped_count: int
+
+
+class CategorySlice(BaseModel):
+    """Per-category score slice (e.g. branded vs generic)."""
+
+    composite: float
+    composite_ci_low: float | None
+    composite_ci_high: float | None
+    denominator_valid: int
+    denominator_total: int
+    failed_count: int
+    skipped_count: int
+
+
+class VisibilityScore(BaseModel):
+    """Composite visibility score (v2) — with per-engine + per-category slices.
+
+    composite is Optional: None + insufficient_data=True when no valid rows
+    (all-failed run). This prevents the "failed analysis as a successful
+    zero-score observation" the brief forbids.
+    """
+
+    composite: float | None = None
+    composite_ci_low: float | None = None
+    composite_ci_high: float | None = None
+    insufficient_data: bool = False
     weights: dict[str, float]
     denominator_valid: int
     denominator_total: int
     failed_count: int
     skipped_count: int
+
+    # Rate components (kept for diagnostics + comparison)
+    mention_rate: float = 0.0
+    recommendation_rate: float = 0.0
+    negative_rate: float = 0.0
+    citation_rate: float = 0.0
+    avg_position: float | None = None
+
+    # Per-engine + per-category slices with denominators
+    per_engine: dict[str, EngineSlice] = Field(default_factory=dict)
+    per_category: dict[str, CategorySlice] = Field(default_factory=dict)
+
+    # Weight sensitivity table — composite under 3 alternative weight sets
+    weight_sensitivity: dict[str, float] = Field(default_factory=dict)
+
+    # Version tracking
+    scoring_version: str = "v2"
+    category_version: str = "v1"
 
 
 class Diagnostic(BaseModel):

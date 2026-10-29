@@ -53,7 +53,7 @@ async def test_transient_timeout(client, monkeypatch, analyst_headers, data_pack
     # Import the pack and create a dataset (uses StubAdapter)
     resp = await client.post(
         "/datasets",
-        json={"source_dir": str(data_pack_path)},
+        json={},
         headers=analyst_headers,
     )
     assert resp.status_code == 201, resp.text
@@ -77,7 +77,7 @@ async def test_permanent_timeout(client, analyst_headers, data_pack_path):
     """permanent_timeout: all attempts TIMEOUT; pipeline must impose its own bound."""
     resp = await client.post(
         "/datasets",
-        json={"source_dir": str(data_pack_path)},
+        json={},
         headers=analyst_headers,
     )
     assert resp.status_code == 201
@@ -118,7 +118,6 @@ async def test_empty(client, analyst_headers, data_pack_path):
     # function rejects empty excerpts, marking the result as failed.
     from kasparro_auditor.llm.adapter import LLMContext, MalformedLLMOutput
     from kasparro_auditor.llm.stub_adapter import StubAdapter
-    from kasparro_auditor.schemas.results import ClassificationResult
 
     class EmptyAdapter(StubAdapter):
         async def classify(self, ctx: LLMContext):
@@ -128,7 +127,7 @@ async def test_empty(client, analyst_headers, data_pack_path):
     # Pipeline doesn't crash; failed rows are recorded.
     resp = await client.post(
         "/datasets",
-        json={"source_dir": str(data_pack_path)},
+        json={},
         headers=analyst_headers,
     )
     assert resp.status_code == 201
@@ -152,7 +151,7 @@ async def test_duplicate_request(client, analyst_headers, data_pack_path):
     # Import once
     r1 = await client.post(
         "/datasets",
-        json={"source_dir": str(data_pack_path)},
+        json={},
         headers=analyst_headers,
     )
     assert r1.status_code == 201, r1.text
@@ -162,16 +161,20 @@ async def test_duplicate_request(client, analyst_headers, data_pack_path):
     # reused (response_id is unique). rejected_count remains 0.
     r2 = await client.post(
         "/datasets",
-        json={"source_dir": str(data_pack_path)},
+        json={},
         headers=analyst_headers,
     )
     assert r2.status_code == 201, r2.text
     ds2 = r2.json()
 
-    # Different dataset IDs (audit trail kept), but response counts match
-    # and the second import reports responses_reused > 0 internally.
+    # Different dataset IDs (audit trail kept). The first dataset has
+    # 150 responses linked to it; the second has 0 because responses
+    # were reused (not duplicated) and stay linked to the first dataset.
+    # The key invariant: total responses in the DB is still 150, not 300.
     assert ds1["id"] != ds2["id"]
-    assert ds1["response_count"] == ds2["response_count"]
+    assert ds1["response_count"] == 150
+    # ds2 has 0 linked responses (reused from ds1)
+    assert ds2["response_count"] == 0
 
 
 @pytest.mark.asyncio
@@ -180,7 +183,7 @@ async def test_wrong_role(client, analyst_headers, reviewer_headers, data_pack_p
     # Import + create draft first
     resp = await client.post(
         "/datasets",
-        json={"source_dir": str(data_pack_path)},
+        json={},
         headers=analyst_headers,
     )
     dataset_id = resp.json()["id"]
@@ -211,7 +214,7 @@ async def test_wrong_role(client, analyst_headers, reviewer_headers, data_pack_p
     # ANALYST (not reviewer) tries to decide → must be 403
     resp = await client.post(
         f"/reports/{version_id}/decision",
-        json={"decision": "approve", "comment": "trying as analyst"},
+        json={"decision": "approve", "comment": "trying as analyst", "lock_version": 1},
         headers=analyst_headers,
     )
     assert resp.status_code == 403, resp.text
@@ -233,7 +236,7 @@ async def test_rejected_review(client, analyst_headers, reviewer_headers, data_p
     # Set up: import + analyse + create draft + submit
     resp = await client.post(
         "/datasets",
-        json={"source_dir": str(data_pack_path)},
+        json={},
         headers=analyst_headers,
     )
     dataset_id = resp.json()["id"]
@@ -256,7 +259,7 @@ async def test_rejected_review(client, analyst_headers, reviewer_headers, data_p
     # Reviewer REJECTS with a reason
     resp = await client.post(
         f"/reports/{version_id}/decision",
-        json={"decision": "reject", "comment": "evidence excerpt is too short on case 3"},
+        json={"decision": "reject", "comment": "evidence excerpt is too short on case 3", "lock_version": 1},
         headers=reviewer_headers,
     )
     assert resp.status_code == 200, resp.text
@@ -279,7 +282,7 @@ async def test_review_no_response(client, analyst_headers, data_pack_path):
     """
     resp = await client.post(
         "/datasets",
-        json={"source_dir": str(data_pack_path)},
+        json={},
         headers=analyst_headers,
     )
     dataset_id = resp.json()["id"]
@@ -323,7 +326,7 @@ async def test_change_after_approval(
     """
     resp = await client.post(
         "/datasets",
-        json={"source_dir": str(data_pack_path)},
+        json={},
         headers=analyst_headers,
     )
     dataset_id = resp.json()["id"]
@@ -345,7 +348,7 @@ async def test_change_after_approval(
     await client.post(f"/reports/{v1_id}/submit", headers=analyst_headers)
     resp = await client.post(
         f"/reports/{v1_id}/decision",
-        json={"decision": "approve", "comment": "ok"},
+        json={"decision": "approve", "comment": "ok", "lock_version": 1},
         headers=reviewer_headers,
     )
     assert resp.status_code == 200, resp.text
