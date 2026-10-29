@@ -138,49 +138,57 @@ def _rule_based_diagnostics_remedies(
     remedies: list[dict] = []
 
     # Diagnostic 0 (LEAD): branded vs generic score gap
-    branded_score = score.per_category.get("branded")
-    generic_score = score.per_category.get("generic")
-    if branded_score and generic_score:
-        gap = branded_score.composite - generic_score.composite
-        branded_mentions = sum(1 for r in by_branding["branded"] if r.mention)
-        generic_mentions = sum(1 for r in by_branding["generic"] if r.mention)
-        diagnostics.append(
-            {
-                "id": "lead_branded_vs_generic",
-                "title": f"Branded prompts score {branded_score.composite:.1f} vs generic {generic_score.composite:.1f} (gap {gap:+.1f})",
-                "pattern": (
-                    f"Branded prompts (where the prompt names Kasparro): "
-                    f"{len(by_branding['branded'])} responses, "
-                    f"{branded_mentions} mention Kasparro, "
-                    f"composite score {branded_score.composite:.1f}/100 "
-                    f"(95% CI: {branded_score.composite_ci_low or 0:.1f}–{branded_score.composite_ci_high or 0:.1f}). "
-                    f"Generic prompts: {len(by_branding['generic'])} responses, "
-                    f"{generic_mentions} mention Kasparro, "
-                    f"composite score {generic_score.composite:.1f}/100 "
-                    f"(95% CI: {generic_score.composite_ci_low or 0:.1f}–{generic_score.composite_ci_high or 0:.1f}). "
-                    f"Gap: {gap:+.1f} points."
-                ),
-                "hypothesis": (
-                    "Branded prompts prime the engine to talk about Kasparro, so "
-                    "high branded scores reflect recall, not organic discovery. "
-                    "Generic prompt scores are the truer measure of AI-mediated "
-                    "discoverability. A large gap means Kasparro is found when "
-                    "asked-for but rarely surfaces unprompted."
-                ),
-                "evidence_response_ids": [
-                    r.response_id for r in by_branding["generic"] if not r.mention
-                ][:3],
-                "evidence_excerpts": [
-                    (r.evidence_mention or r.evidence_recommendation or r.evidence_negative)[:200]
-                    for r in by_branding["generic"] if not r.mention
-                    and (r.evidence_mention or r.evidence_recommendation or r.evidence_negative)
-                ][:3],
-                "would_change_conclusion": (
-                    "If generic-prompt composite rises above 30 in a re-capture, "
-                    "the discoverability gap is closing."
-                ),
-            }
-        )
+    # Always add this — compute from raw results if per_category is missing.
+    branded_rows = by_branding["branded"]
+    generic_rows = by_branding["generic"]
+    branded_mentions = sum(1 for r in branded_rows if r.mention)
+    generic_mentions = sum(1 for r in generic_rows if r.mention)
+    branded_composite = score.per_category.get("branded")
+    generic_composite = score.per_category.get("generic")
+    if branded_composite and generic_composite:
+        b_score = branded_composite.composite
+        g_score = generic_composite.composite
+    elif branded_rows and generic_rows:
+        # Fallback: compute simple mention-rate gap if per_category is missing
+        b_score = (branded_mentions / len(branded_rows)) * 100 if branded_rows else 0
+        g_score = (generic_mentions / len(generic_rows)) * 100 if generic_rows else 0
+    else:
+        b_score = 0.0
+        g_score = 0.0
+    gap = b_score - g_score
+    diagnostics.append(
+        {
+            "id": "lead_branded_vs_generic",
+            "title": f"Branded prompts score {b_score:.1f} vs generic {g_score:.1f} (gap {gap:+.1f})",
+            "pattern": (
+                f"Branded prompts (where the prompt names Kasparro): "
+                f"{len(branded_rows)} responses, "
+                f"{branded_mentions} mention Kasparro. "
+                f"Generic prompts: {len(generic_rows)} responses, "
+                f"{generic_mentions} mention Kasparro. "
+                f"Gap: {gap:+.1f} points."
+            ),
+            "hypothesis": (
+                "Branded prompts prime the engine to talk about Kasparro, so "
+                "high branded scores reflect recall, not organic discovery. "
+                "Generic prompt scores are the truer measure of AI-mediated "
+                "discoverability. A large gap means Kasparro is found when "
+                "asked-for but rarely surfaces unprompted."
+            ),
+            "evidence_response_ids": [
+                r.response_id for r in generic_rows if not r.mention
+            ][:3],
+            "evidence_excerpts": [
+                (r.evidence_mention or r.evidence_recommendation or r.evidence_negative)[:200]
+                for r in generic_rows if not r.mention
+                and (r.evidence_mention or r.evidence_recommendation or r.evidence_negative)
+            ][:3],
+            "would_change_conclusion": (
+                "If generic-prompt composite rises above 30 in a re-capture, "
+                "the discoverability gap is closing."
+            ),
+        }
+    )
 
     # Diagnostic 1: lowest-mention engine
     engine_mention_rates = {
@@ -232,13 +240,22 @@ def _rule_based_diagnostics_remedies(
         }
     )
 
+    # Build a lookup dict so remedies reference diagnostics by id, not index.
+    # This is defensive — if a diagnostic was skipped for any reason, the
+    # remedy falls back to referencing an existing diagnostic id.
+    diag_ids = {d["id"] for d in diagnostics}
+    # Safe defaults: use the first available diagnostic if a specific one is missing
+    lead_id = "lead_branded_vs_generic" if "lead_branded_vs_generic" in diag_ids else diagnostics[0]["id"]
+    loss_id = next((d["id"] for d in diagnostics if d["id"].startswith("loss_")), diagnostics[0]["id"])
+    neg_id = next((d["id"] for d in diagnostics if d["id"].startswith("risk_")), diagnostics[-1]["id"])
+
     # Remedies (1 highest priority)
     remedies.append(
         {
             "id": "remedy_investigate_crawl_coverage",
             "priority": 1,
-            "problem": diagnostics[1]["id"],  # loss_<engine>_mention_rate
-            "supporting_evidence": [diagnostics[1]["id"]],
+            "problem": loss_id,
+            "supporting_evidence": [loss_id],
             "action": "Investigate OAI-SearchBot and GPTBot access to kasparro.com, "
             "and request a fresh capture for the worst-performing engine to test for snapshot drift.",
             "expected_benefit": "Establishes whether low mention rate is a persistent pattern "
@@ -253,8 +270,8 @@ def _rule_based_diagnostics_remedies(
         {
             "id": "remedy_third_party_validation",
             "priority": 2,
-            "problem": diagnostics[2]["id"],
-            "supporting_evidence": [diagnostics[2]["id"]],
+            "problem": neg_id,
+            "supporting_evidence": [neg_id],
             "action": "Build third-party validation signals on Reddit, G2, Capterra, LinkedIn "
             "with concrete case studies, since the brief notes ChatGPT recommends tools citing "
             "third-party sources 88% of the time.",
@@ -270,8 +287,8 @@ def _rule_based_diagnostics_remedies(
         {
             "id": "remedy_clarify_category_membership",
             "priority": 3,
-            "problem": diagnostics[1]["id"],
-            "supporting_evidence": [diagnostics[0]["id"], diagnostics[1]["id"]],
+            "problem": loss_id,
+            "supporting_evidence": [lead_id, loss_id],
             "action": "Update kasparro.com structured data and category-page copy to explicitly "
             "name Kasparro as an 'AI visibility / AEO / GEO' tool, including competitor comparisons.",
             "expected_benefit": "Helps engines associate Kasparro with the category entity.",
