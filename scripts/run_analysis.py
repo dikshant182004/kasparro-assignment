@@ -44,10 +44,16 @@ async def main(
         f"failed={counts['failed']} skipped={counts['skipped']}"
     )
     score = summary["score"]
+    # Handle None composite (insufficient_data case)
+    composite_str = f"{score['composite']:.2f}" if score['composite'] is not None else "N/A (insufficient data)"
+    ci_low_str = f"{score['composite_ci_low']:.2f}" if score['composite_ci_low'] is not None else "N/A"
+    ci_high_str = f"{score['composite_ci_high']:.2f}" if score['composite_ci_high'] is not None else "N/A"
     print(
-        f"Score:          composite={score['composite']:.2f}/100 "
-        f"(95% CI: {score['composite_ci_low']:.2f}-{score['composite_ci_high']:.2f})"
+        f"Score:          composite={composite_str}/100 "
+        f"(95% CI: {ci_low_str}-{ci_high_str})"
     )
+    if score.get('insufficient_data'):
+        print(f"  ⚠️ insufficient_data=True — no valid results to score.")
     print(f"  mention_rate   = {score['mention_rate']:.3f}")
     print(f"  rec_rate       = {score['recommendation_rate']:.3f}")
     print(f"  neg_rate       = {score['negative_rate']:.3f}")
@@ -71,7 +77,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--mode",
-        choices=["live", "replay", "stub"],
+        choices=["live", "local", "replay", "stub"],
         default=None,
         help="Override EXECUTION_MODE for this run.",
     )
