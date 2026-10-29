@@ -1,0 +1,17 @@
+{
+  "response_id": "ac5bdf24-6a6e-49a0-abf5-2755ff3b42bc",
+  "prompt_hash": "9210d3f056999041",
+  "model": "openai/gpt-oss-20b",
+  "attempts": 2,
+  "latency_ms": 7169,
+  "cached_at": 1793278329.381994,
+  "judgment": {
+    "recommendation": false,
+    "negative_characterisation": true,
+    "recommendation_position": null,
+    "competitors_extra": [],
+    "evidence_mention": "Kasparro positions itself as an \"AI Revenue Engine\" that helps brands become more visible in AI assistants like ChatGPT.",
+    "evidence_recommendation": "",
+    "evidence_negative": "I would not expect it to reliably make a B2B SaaS product start getting recommended by ChatGPT on its own."
+  }
+}

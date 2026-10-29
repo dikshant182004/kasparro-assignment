@@ -1,0 +1,17 @@
+{
+  "response_id": "preflight",
+  "prompt_hash": "9210d3f056999041",
+  "model": "openai/gpt-oss-20b",
+  "attempts": 1,
+  "latency_ms": 10363,
+  "cached_at": 1793278319.5234258,
+  "judgment": {
+    "recommendation": false,
+    "negative_characterisation": false,
+    "recommendation_position": null,
+    "competitors_extra": [],
+    "evidence_mention": "Kasparro is an AI visibility tool.",
+    "evidence_recommendation": "",
+    "evidence_negative": ""
+  }
+}

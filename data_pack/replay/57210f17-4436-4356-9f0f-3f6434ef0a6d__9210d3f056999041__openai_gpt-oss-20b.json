@@ -1,0 +1,21 @@
+{
+  "response_id": "57210f17-4436-4356-9f0f-3f6434ef0a6d",
+  "prompt_hash": "9210d3f056999041",
+  "model": "openai/gpt-oss-20b",
+  "attempts": 1,
+  "latency_ms": 22561,
+  "cached_at": 1793278393.3531055,
+  "judgment": {
+    "recommendation": true,
+    "negative_characterisation": false,
+    "recommendation_position": null,
+    "competitors_extra": [
+      "Perplexity",
+      "G2",
+      "Gartner"
+    ],
+    "evidence_mention": "Yes, **Kasparro** \u2014and similar specialized **Perplexity SEO** or **AI Search Optimization** strategies\u2014can help an enterprise software brand increase its visibility, citations, and authority within Perplexity answers.",
+    "evidence_recommendation": "Yes, **Kasparro** \u2014and similar specialized **Perplexity SEO** or **AI Search Optimization** strategies\u2014can help an enterprise software brand increase its visibility, citations, and authority within Perplexity answers.",
+    "evidence_negative": ""
+  }
+}

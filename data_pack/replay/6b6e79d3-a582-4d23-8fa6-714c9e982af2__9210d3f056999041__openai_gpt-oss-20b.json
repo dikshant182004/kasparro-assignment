@@ -1,0 +1,17 @@
+{
+  "response_id": "6b6e79d3-a582-4d23-8fa6-714c9e982af2",
+  "prompt_hash": "9210d3f056999041",
+  "model": "openai/gpt-oss-20b",
+  "attempts": 1,
+  "latency_ms": 8478,
+  "cached_at": 1793278442.0180275,
+  "judgment": {
+    "recommendation": true,
+    "negative_characterisation": false,
+    "recommendation_position": null,
+    "competitors_extra": [],
+    "evidence_mention": "Yes, **Kasparro** is designed specifically for this use case.",
+    "evidence_recommendation": "Yes, **Kasparro** is designed specifically for this use case.",
+    "evidence_negative": ""
+  }
+}

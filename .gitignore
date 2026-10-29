@@ -28,7 +28,7 @@ dist/
 *.db-shm
 
 # Captured LLM responses (regenerated from real runs)
-data_pack/replay/*.json
+# data_pack/replay/*.json
 
 # Generated outputs (eval/results/ IS committed — it's the deliverable)
 outputs/
@@ -36,7 +36,7 @@ eval/results/.cache/
 
 # Assignment input packs (kept locally, never committed)
 # The brief says: "Keep supplied data and private outputs out of public Git history."
-data_pack/
+data_pack/data
 provenance/
 reference/
 schemas/

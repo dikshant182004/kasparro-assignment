@@ -22,7 +22,7 @@ from kasparro_auditor.db.models import PromptRow, ResponseRow
 from kasparro_auditor.ingest.loader import import_pack
 from kasparro_auditor.llm.groq_adapter import GroqAdapter
 from kasparro_auditor.llm.adapter import LLMContext, LLMError, classify_response
-from kasparro_auditor.scoring.competitors import COMPETITOR_HINTS
+from kasparro_auditor.scoring.competitors import COMPETITOR_ALIASES
 
 
 async def main() -> int:
@@ -60,7 +60,7 @@ async def main() -> int:
                 engine=response.engine.value,
                 prompt_text=prompt.text,
                 answer_text=response.answer_text,
-                competitor_hints=COMPETITOR_HINTS,
+                competitor_hints=list(COMPETITOR_ALIASES.keys()),
             )
             async with sem:
                 try:
