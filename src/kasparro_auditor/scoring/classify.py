@@ -293,10 +293,19 @@ async def run_analysis(
     adapter = adapter or build_adapter(ExecutionMode(run.execution_mode))
 
     # Pull all responses + their prompts in one query.
+    # Query by the Dataset's run_id (not dataset_id) because reused
+    # responses from a previous import keep their ORIGINAL dataset_id.
+    # The run_id is stable across imports (it comes from run.json), so
+    # this finds all 150 responses regardless of which Dataset row they're
+    # linked to. We look up the Dataset to get its run_id.
+    from kasparro_auditor.db.models import Dataset
+    ds = await session.get(Dataset, dataset_id)
+    run_id_for_query = ds.run_id if ds is not None else None
+
     stmt = (
         select(ResponseRow, PromptRow)
         .join(PromptRow, ResponseRow.prompt_id == PromptRow.prompt_id)
-        .where(ResponseRow.dataset_id == dataset_id)
+        .where(ResponseRow.run_id == run_id_for_query)
         .order_by(ResponseRow.prompt_id, ResponseRow.engine)
     )
     rows = (await session.execute(stmt)).all()
