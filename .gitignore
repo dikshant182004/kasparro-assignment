@@ -1,0 +1,39 @@
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+build/
+dist/
+
+# Env + secrets
+.env
+.env.local
+*.key
+
+# SQLite
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Captured LLM responses (regenerated from real runs)
+data_pack/replay/*.json
+
+# Generated outputs
+outputs/
+eval/results/
+
+# Assignment input packs (kept locally, never committed)
+data_pack/
+!data_pack/.gitkeep

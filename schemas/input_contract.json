@@ -1,0 +1,199 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Kasparro candidate input records",
+  "definitions": {
+    "prompt": {
+      "type": "object",
+      "required": [
+        "prompt_id",
+        "run_id",
+        "text"
+      ],
+      "properties": {
+        "prompt_id": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "response": {
+      "type": "object",
+      "required": [
+        "response_id",
+        "run_id",
+        "prompt_id",
+        "engine",
+        "answer_text",
+        "capture_status"
+      ],
+      "properties": {
+        "response_id": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "prompt_id": {
+          "type": "string"
+        },
+        "engine": {
+          "enum": [
+            "aimode",
+            "chatgpt",
+            "gemini"
+          ]
+        },
+        "answer_text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "answer_markdown": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "capture_status": {
+          "const": "captured"
+        },
+        "provider_timestamp": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "archive_stored_at": {
+          "type": "string"
+        },
+        "settings": {
+          "type": "object"
+        }
+      }
+    },
+    "citation": {
+      "type": "object",
+      "required": [
+        "citation_id",
+        "response_id",
+        "prompt_id",
+        "engine",
+        "order",
+        "citation_type",
+        "url"
+      ],
+      "properties": {
+        "citation_id": {
+          "type": "string"
+        },
+        "response_id": {
+          "type": "string"
+        },
+        "prompt_id": {
+          "type": "string"
+        },
+        "engine": {
+          "enum": [
+            "aimode",
+            "chatgpt",
+            "gemini"
+          ]
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "citation_type": {
+          "enum": [
+            "inline_hyperlink",
+            "sources_panel"
+          ]
+        },
+        "url": {
+          "type": "string"
+        },
+        "publication_date": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "case": {
+      "type": "object",
+      "required": [
+        "case_id",
+        "request_id",
+        "question",
+        "decision_as_of",
+        "allowed_source_ids"
+      ],
+      "properties": {
+        "case_id": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "question": {
+          "type": "string"
+        },
+        "decision_as_of": {
+          "type": "string"
+        },
+        "allowed_source_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "required": [
+        "source_id",
+        "kind",
+        "title",
+        "as_of",
+        "body",
+        "text_path"
+      ],
+      "properties": {
+        "source_id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "as_of": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "body": {
+          "type": "string"
+        },
+        "text_path": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}
