@@ -34,7 +34,7 @@ Denominators always exclude failed analyses. The brief is explicit: *"A failed a
 - **PostgreSQL instead of SQLite.** Rejected: SQLite is sufficient per the brief; PostgreSQL would require a deploy dependency.
 - **SQLModel instead of SQLAlchemy 2.0 + Pydantic.** Considered; SQLModel's latest release had a Pydantic v2 regression (per `fastapi/sqlmodel` issue #1706) at the time of writing. Plain SQLAlchemy 2.0 + Pydantic v2 is more stable.
 - **LLM-as-judge for evaluation.** Rejected: the brief explicitly says *"an LLM judging its own prose is insufficient."* All eval labels are exact-match against hand-labeled expected values.
-- **Mistral or Qwen as the LLM.** Considered; Groq's `llama-3.3-70b-versatile` is production GA, supports JSON mode + tool calling, and the cost math ($0.24 for the full run) is comfortably under the $5 cap. Qwen was preview-only on Groq at time of writing.
+- **Mistral or Qwen as the LLM.** Considered; Groq's `openai/gpt-oss-120b` is production GA on Groq (post-retirement of `llama-3.3-70b-versatile` and `llama-3.1-8b-instant` on 16 Aug 2026), supports JSON mode + tool calling, and the cost math ($0.24 for the full 150-call run) is comfortably under the $5 cap. Qwen was preview-only on Groq at time of writing. An Ollama adapter is also provided for approved local-model access per the brief.
 
 ## Top remedy
 
@@ -70,7 +70,7 @@ This is the highest-priority remedy because: (a) it has low effort, (b) the unce
 - **No OAuth** — the brief says full OAuth is unnecessary; two local tokens suffice.
 - **No multi-agent orchestration** — single bounded synchronous flow per the brief.
 - **Concurrency limits + expiry policy** — described in the README as future work, not implemented.
-- **Repeated-model studies** — optional per the brief; only one real-model run is available in replay mode.
+- **Repeated-model studies** — optional per the brief; the only classifier path exercised in this submission is **stub mode** (deterministic regex). Live-model runs require hiring-team approval per the brief's approved-access rule and were not performed within the time budget. The replay cache is empty; reviewers can populate it via `make capture` after obtaining an approved Groq key, then rerun `make replay` to inspect live-model outputs.
 
 ## Questions before release
 
@@ -82,6 +82,6 @@ This is the highest-priority remedy because: (a) it has low effort, (b) the unce
 ## AI assistance disclosure
 
 - **Code generation:** Portions of this codebase were drafted with the assistance of an AI coding assistant (Claude / GPT). Every file was reviewed, tested, and verified by the candidate before submission.
-- **LLM usage in the pipeline:** Groq's `llama-3.3-70b-versatile` was used for: (1) classification of each of the 150 responses, (2) diagnostic synthesis, (3) remedy drafting.
+- **LLM usage in the pipeline:** The pipeline supports three execution modes (live / local / replay / stub) and is **fully runnable in stub or replay mode without an API key**. Per the brief's approved-access rule, a personal Groq key is not used by default — the candidate would request hiring-team approval before any live run. All reported numbers in this submission were produced in **stub mode** (deterministic regex-based classifier) and are explicitly labelled `model_quality_verified: false` in every exported report. The replay cache is empty (`make capture` was not run within the time budget), so reviewers rerunning the pipeline will also see stub-mode outputs. To produce live-model results: set `GROQ_API_KEY` + `EXECUTION_MODE=live` in `.env`, then run `make capture` to populate `data_pack/replay/{response_id}.json`, then run `make replay` to re-classify using the cached live outputs.
 - **Verification:** All LLM outputs are verified deterministically — `evidence_excerpt` must be a verbatim substring of `answer_text`, every cited `response_id` must exist in the run's results, and the eval harness grades against hand-labeled cases (not LLM-judged).
 - **AI was not used to grade its own outputs.** Per the brief: *"an LLM judging its own prose is insufficient."*

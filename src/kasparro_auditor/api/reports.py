@@ -137,7 +137,7 @@ async def create_report_draft(
     if run is None:
         raise NotFoundError(f"AnalysisRun {analysis_id} not found.")
 
-    diagnostics, remedies, score = await build_diagnostics_and_remedies(session, run.id)
+    diagnostics, remedies, score, diag_source = await build_diagnostics_and_remedies(session, run.id)
     scores_dict = score.model_dump()
     engine_summary = await _group_by_engine_summary(session, run.id)
     # Convert per_category CategorySlice objects to plain dicts (JSON-serializable)
@@ -155,6 +155,7 @@ async def create_report_draft(
         ),
         "by_engine": engine_summary,
         "per_category": per_category_plain,
+        "diagnostics_source": diag_source,
     }
 
     version = await create_draft(

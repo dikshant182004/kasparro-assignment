@@ -63,7 +63,7 @@ async def run_full_pipeline(
         await run_analysis(session, run, report.dataset_id, adapter)
 
         # 3. Diagnostics + remedies + score
-        diagnostics, remedies, score = await build_diagnostics_and_remedies(
+        diagnostics, remedies, score, diag_source = await build_diagnostics_and_remedies(
             session, run.id, use_llm=(mode == ExecutionMode.LIVE)
         )
 
