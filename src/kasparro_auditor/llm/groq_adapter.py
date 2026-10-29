@@ -72,10 +72,12 @@ class GroqAdapter:
             )
         # Use JSON mode instead of the default TOOLS mode.
         # Groq's openai/gpt-oss models have a bug with tool calling.
+        # NOTE: do NOT pass max_retries here — it conflicts with the Groq
+        # SDK's own max_retries parameter. Our custom retry loop in classify()
+        # handles retries.
         self.client = instructor.from_groq(
             AsyncGroq(api_key=self.settings.groq_api_key),
             mode=instructor.Mode.JSON,
-            max_retries=self.settings.groq_max_retries,
         )
         self.model_name = self.settings.groq_model
         self._cache_dir = self.settings.replay_cache_dir

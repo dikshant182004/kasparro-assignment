@@ -376,7 +376,9 @@ async def run_analysis(
     # Run in chunks to keep the session transaction manageable.
     chunk_size = 10
     successful = failed = skipped = 0
-    for i in range(0, len(rows), chunk_size):
+    total_rows = len(rows)
+    print(f"\nClassifying {total_rows} responses (mode={adapter.mode}, concurrency={settings.max_concurrent_llm_calls})...")
+    for i in range(0, total_rows, chunk_size):
         chunk = rows[i : i + chunk_size]
         results: Iterable[ResponseResult] = await asyncio.gather(
             *(_bounded(c) for c in chunk), return_exceptions=False
@@ -389,6 +391,11 @@ async def run_analysis(
             else:
                 successful += 1
         await session.commit()  # flush chunk
+        done = min(i + chunk_size, total_rows)
+        pct = (done / total_rows) * 100
+        print(f"  Progress: {done}/{total_rows} ({pct:.0f}%) — ok={successful} fail={failed} skip={skipped}")
+
+    print(f"\nClassification complete: {successful} successful, {failed} failed, {skipped} skipped\n")
 
     run.successful = successful
     run.failed = failed
