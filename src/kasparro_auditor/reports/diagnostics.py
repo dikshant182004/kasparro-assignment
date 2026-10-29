@@ -69,26 +69,47 @@ async def build_diagnostics_and_remedies(
     session: AsyncSession,
     run_id: str,
     use_llm: bool = True,
-) -> tuple[list[dict], list[dict], VisibilityScore]:
-    """Return (diagnostics, remedies, score) for the given run."""
+) -> tuple[list[dict], list[dict], VisibilityScore, str]:
+    """Return (diagnostics, remedies, score, source) for the given run.
+
+    `source` is one of:
+      - "llm"      : diagnostics came from the LLM path (with verification)
+      - "rule"     : diagnostics came from the rule-based fallback
+      - "rule_llm_failed" : LLM path failed, fell back to rule-based (FLAGGED)
+
+    The source is recorded so the report can disclose which path produced
+    the diagnostics. Silent fallback is no longer hidden.
+    """
     score = await compute_visibility_score(session, run_id)
 
-    # Pull all results for context
+    # Pull only VALID (non-failed) results — denominator fix.
     results = (
         await session.scalars(
-            select(ResponseResult).where(ResponseResult.run_id == run_id)
+            select(ResponseResult)
+            .where(ResponseResult.run_id == run_id)
+            .where(ResponseResult.failed == False)  # noqa: E712
+            .where(ResponseResult.skipped == False)  # noqa: E712
         )
     ).all()
 
     if not use_llm or not results:
-        return _rule_based_diagnostics_remedies(results, score)
+        diag, rem, _ = _rule_based_diagnostics_remedies(results, score)
+        return diag, rem, score, "rule"
 
     # Try LLM-based synthesis with deterministic verification.
     try:
-        return await _llm_diagnostics_remedies(session, run_id, results, score)
-    except Exception:
-        # If LLM fails, fall back to rule-based. Failures remain visible.
-        return _rule_based_diagnostics_remedies(results, score)
+        diag, rem, _ = await _llm_diagnostics_remedies(session, run_id, results, score)
+        return diag, rem, score, "llm"
+    except Exception as err:
+        # LLM failed — fall back to rule-based, but FLAG it.
+        diag, rem, _ = _rule_based_diagnostics_remedies(results, score)
+        # Stash the error on the first diagnostic so the report surfaces it.
+        if diag:
+            diag[0]["llm_fallback_reason"] = (
+                f"LLM diagnostics synthesis failed ({type(err).__name__}: {err}); "
+                "fell back to rule-based diagnostics. This is flagged for reviewer awareness."
+            )
+        return diag, rem, score, "rule_llm_failed"
 
 
 # ---------------------------------------------------------------------------
@@ -190,14 +211,17 @@ def _rule_based_diagnostics_remedies(
     # Diagnostic 2: negative characterisation rate
     # (Dropped the "best recommendation engine" diagnostic to keep the total at 3,
     # now that the lead branded-vs-generic diagnostic is added.)
+    # `results` is already filtered to non-failed/non-skipped in
+    # build_diagnostics_and_remedies, so len(results) is the valid count.
     neg_count = sum(1 for r in results if r.negative_characterisation)
-    neg_rate = neg_count / max(1, len([r for r in results if not r.failed]))
+    valid_count = len(results)
+    neg_rate = neg_count / max(1, valid_count)
     neg_evidence = [r for r in results if r.negative_characterisation][:3]
     diagnostics.append(
         {
             "id": "risk_negative_characterisation",
             "title": f"{neg_count} responses characterise Kasparro negatively",
-            "pattern": f"{neg_count} of {len(results)} valid responses express "
+            "pattern": f"{neg_count} of {valid_count} valid responses express "
             f"scepticism, call Kasparro a gimmick/hype, or question its legitimacy "
             f"(negative_rate={neg_rate:.2f}).",
             "hypothesis": "Reddit/Quora threads criticising AI-visibility tools as a category "
@@ -222,7 +246,7 @@ def _rule_based_diagnostics_remedies(
             "effort": "low",
             "uncertainty": "high",
             "validation_step": f"Re-capture 10 prompts on {worst_engine}; compare mention_rate "
-            "to baseline {worst_rate:.2f}.",
+            f"to baseline {worst_rate:.2f}.",
         }
     )
     remedies.append(
@@ -322,15 +346,62 @@ async def _llm_diagnostics_remedies(
         },
     )
 
-    # Verify: every cited response_id exists; every excerpt is verbatim.
+    # Verify: every cited response_id exists; every excerpt is verbatim IN THE
+    # CITED RESPONSE'S evidence (not just any result). Bad response_ids are
+    # REJECTED, not silently dropped — flag the diagnostic if any evidence
+    # failed verification so the reviewer sees it.
     valid_ids = {r.response_id for r in results}
-    id_to_text = {r.response_id: (r.evidence_mention or r.evidence_recommendation or r.evidence_negative) for r in results}
+    # Build a lookup of (response_id → answer_text) for excerpt verification.
+    # This pulls the actual answer_text from the ResponseRow (not the
+    # ResponseResult's evidence_* fields, which are LLM-extracted snippets).
+    from kasparro_auditor.db.models import ResponseRow as _RR
+    cited_ids_all: set[str] = set()
+    for d in diagnostics[:3]:
+        cited_ids_all.update(d.get("evidence_response_ids", []))
+    answer_text_lookup: dict[str, str] = {}
+    if cited_ids_all:
+        rows_lookup = (
+            await session.execute(
+                select(_RR.response_id, _RR.answer_text).where(
+                    _RR.response_id.in_(cited_ids_all)
+                )
+            )
+        ).all()
+        answer_text_lookup = {r[0]: r[1] for r in rows_lookup}
+
     cleaned_diagnostics: list[dict] = []
     for d in diagnostics[:3]:
-        kept_ids = [rid for rid in d.get("evidence_response_ids", []) if rid in valid_ids]
-        kept_excerpts = [e for e in d.get("evidence_excerpts", []) if _excerpt_in_results(e, results)]
-        d["evidence_response_ids"] = kept_ids
-        d["evidence_excerpts"] = kept_excerpts
+        cited_ids = d.get("evidence_response_ids", [])
+        cited_excerpts = d.get("evidence_excerpts", [])
+        # Verify each cited response_id exists
+        bad_ids = [rid for rid in cited_ids if rid not in valid_ids]
+        # Verify each excerpt is verbatim in the CITED response's answer_text
+        bad_excerpts: list[str] = []
+        for rid, excerpt in zip(cited_ids, cited_excerpts, strict=False):
+            if not excerpt:
+                continue
+            text = answer_text_lookup.get(rid, "")
+            if excerpt not in text:
+                bad_excerpts.append(excerpt)
+
+        if bad_ids:
+            d["evidence_verification_warning"] = (
+                f"LLM cited {len(bad_ids)} response_ids that don't exist in the run "
+                f"({bad_ids[:3]}). They were REJECTED — the diagnostic ships with the "
+                f"remaining {len(cited_ids) - len(bad_ids)} valid citations."
+            )
+            d["evidence_response_ids"] = [rid for rid in cited_ids if rid in valid_ids]
+        if bad_excerpts:
+            d.setdefault("evidence_verification_warning", "")
+            d["evidence_verification_warning"] += (
+                f" {len(bad_excerpts)} excerpts were not verbatim in the cited "
+                f"response's answer_text and were REJECTED."
+            )
+            d["evidence_excerpts"] = [
+                e for e in cited_excerpts
+                if e in (answer_text_lookup.get(cited_ids[i], "") if i < len(cited_ids) else "")
+                or e == ""
+            ]
         cleaned_diagnostics.append(d)
 
     remedies = await _llm_call_for_json(
