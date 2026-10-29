@@ -12,8 +12,8 @@
 
 ## Classifier: candidate (stub) (mode=stub)
 
-- Total cases: 12
-- Successful: 10
+- Total cases: 15
+- Successful: 13
 - Failed: 0
 - Skipped: 2
 - Unsupported-claim failures: 0
@@ -24,39 +24,7 @@
 |---|---|---|---|
 | mention | 1.000 | 1.000 | 1.000 |
 | prompt_names_brand | n/a | n/a | n/a |
-
-### LLM Judgment metrics
-
-| Label | Precision | Recall | F1 |
-|---|---|---|---|
-| recommendation | n/a | 0.000 | n/a |
-| negative_characterisation | n/a | 0.000 | n/a |
-
-### Competitor set overlap
-
-| Metric | Value |
-|---|---|
-| Precision | 0.333 |
-| Recall | 1.000 |
-| F1 | 0.500 |
-| Intersection | 2 |
-| Predicted-only (FP) | 4 |
-| Expected-only (FN) | 0 |
-
-## Classifier: rule-baseline-v2 (mode=stub)
-
-- Total cases: 12
-- Successful: 10
-- Failed: 0
-- Skipped: 2
-- Unsupported-claim failures: 0
-
-### Deterministic Facts metrics
-
-| Fact | Precision | Recall | F1 |
-|---|---|---|---|
-| mention | 1.000 | 1.000 | 1.000 |
-| prompt_names_brand | n/a | n/a | n/a |
+| has_kasparro_citation | 1.000 | 1.000 | 1.000 |
 
 ### LLM Judgment metrics
 
@@ -72,8 +40,42 @@
 | Precision | 0.333 |
 | Recall | 1.000 |
 | F1 | 0.500 |
-| Intersection | 2 |
-| Predicted-only (FP) | 4 |
+| Intersection | 3 |
+| Predicted-only (FP) | 6 |
+| Expected-only (FN) | 0 |
+
+## Classifier: rule-baseline-v2 (mode=stub)
+
+- Total cases: 15
+- Successful: 13
+- Failed: 0
+- Skipped: 2
+- Unsupported-claim failures: 0
+
+### Deterministic Facts metrics
+
+| Fact | Precision | Recall | F1 |
+|---|---|---|---|
+| mention | 1.000 | 1.000 | 1.000 |
+| prompt_names_brand | n/a | n/a | n/a |
+| has_kasparro_citation | 1.000 | 1.000 | 1.000 |
+
+### LLM Judgment metrics
+
+| Label | Precision | Recall | F1 |
+|---|---|---|---|
+| recommendation | n/a | 0.000 | n/a |
+| negative_characterisation | 0.000 | 0.000 | n/a |
+
+### Competitor set overlap
+
+| Metric | Value |
+|---|---|
+| Precision | 0.333 |
+| Recall | 1.000 |
+| F1 | 0.500 |
+| Intersection | 3 |
+| Predicted-only (FP) | 6 |
 | Expected-only (FN) | 0 |
 
 

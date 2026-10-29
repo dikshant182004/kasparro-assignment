@@ -288,3 +288,19 @@ All outputs are reproducible in `stub` or `replay` mode with no API key. To run 
 - A bounded synchronous flow is used for the small assignment dataset (150 responses, bounded concurrency). The brief explicitly allows this.
 - All secrets stay in environment variables. The `.env.example` documents every required variable.
 - The supplied pack (`data_pack/`) is NOT committed to git (see `.gitignore`). Reviewers must place it locally.
+
+## Concurrency limits and expiry policy (future work)
+
+The brief says *"Describe an expiry policy and concurrency limits as future work; implementing them is optional."*
+
+### Implemented concurrency limits
+- **Optimistic locking** on `ReportVersion` via the `lock_version` column. Every state transition (PATCH, submit, decide, fork) checks the caller's observed `lock_version` matches the current value, then increments it. Mismatch → 409 `concurrent_modification`. This catches two reviewers deciding at once.
+- **One running analysis per dataset**: `POST /analyses` checks for an existing `status IN ('pending','running')` row on the same dataset and returns 409 `duplicate_request` if found.
+- **Bounded LLM concurrency**: `max_concurrent_llm_calls=2` (default) leaves margin under Groq's 30 RPM free-tier limit.
+
+### Future work — expiry policy (described, not implemented)
+- **Approved-version expiry**: An approved report version older than **90 days** should require re-review before export. Rationale: AI engine answers drift over time; an approval based on a 6-month-old capture no longer reflects current visibility. Implementation: add an `expires_at` column to `ReportVersion`, computed at approval time. `assert_exportable()` would refuse export past the expiry with 409 `expired`.
+- **Submitted-but-undecided expiry**: A submitted version that receives no reviewer decision within **7 days** should auto-transition to `expired` (a new state). This prevents submitted versions from sitting in review indefinitely. Implementation: a daily cron job that scans `submitted_at < now() - 7d` and transitions those rows to `expired`.
+- **Draft expiry**: A draft version with no PATCH activity for **30 days** should be auto-archived. Prevents abandoned drafts from cluttering the version history.
+- **Token rotation**: The two local tokens (`ANALYST_TOKEN`, `REVIEWER_TOKEN`) should be rotated every 90 days. The startup check (`validate_startup()`) refuses default tokens; a future enhancement would track `last_rotated_at` and warn after 90 days.
+- **Decision history limit**: A single reviewer making >5 decisions on the same version in 1 hour is suspicious (potential abuse). Rate-limit the `/decision` endpoint per actor.

@@ -97,6 +97,18 @@ async def _verify_evidence_for_submit(
             f"Report must have exactly 3 remedies; got {len(version.remedies)}."
         )
 
+    # Verify every remedy's supporting_evidence references an existing
+    # diagnostic id — prevents remedies that cite non-existent diagnostics.
+    diag_ids = {d.get("id") for d in version.diagnostics if d.get("id")}
+    for r in version.remedies:
+        for evidence_id in r.get("supporting_evidence", []):
+            if evidence_id not in diag_ids:
+                raise UnsupportedClaimsError(
+                    f"Remedy '{r.get('id', '?')}' cites supporting_evidence "
+                    f"'{evidence_id}' which is not one of the 3 diagnostic ids "
+                    f"({sorted(diag_ids)}). Each remedy must cite a real diagnostic."
+                )
+
     # Build response_id → answer_text lookup for evidence verification
     cited_ids: set[str] = set()
     for d in version.diagnostics:
